@@ -55,6 +55,11 @@ let awakeChild = null; // keep-awake helper process
 let pauseChild = null; // full-screen "paused" overlay process
 let pauseActive = false; // true while paused (overlay reopens if student closes it)
 let pauseMessage = ""; // text shown on the pause overlay
+let messageChild = null; // current full-screen classroom-message overlay
+let messageGeneration = 0; // invalidates exit handlers when a display is replaced
+let activeMessage = null; // authoritative enforced warning/transition state
+let messageExpiryTimer = null;
+let messageRespawnTimer = null;
 
 // Browser process names used by "close browsers" (to clear an already-open tab
 // that a hosts block can't retroactively close).

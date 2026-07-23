@@ -42,9 +42,20 @@
   }
 
   // ------------------------------------------------------------------ state
+  const FuzzySearch = window.IDTFuzzySearch;
+  if (!FuzzySearch) throw new Error("Local fuzzy-search utility failed to load.");
+
   const D = { org: [], devices: {}, layouts: {}, schedules: [], instructorCodeRequired: false };
   const nav = { view: "login", locationId: null, buildingId: null, classId: null };
-  const ui = { blockDurationSec: 60, loginRole: "instructor", connected: false, monitorMode: "grid", dragging: null, unlocked: {} };
+  const ui = {
+    blockDurationSec: 60,
+    loginRole: "instructor",
+    connected: false,
+    monitorMode: "grid",
+    dragging: null,
+    unlocked: {},
+    search: {},
+  };
   // /demo runs a self-contained simulated classroom (no hub, no login).
   const DEMO = location.pathname.replace(/\/+$/, "").toLowerCase() === "/demo";
   let deepLinkDone = false;
@@ -451,6 +462,203 @@
     return el("label", { class: "field" }, el("span", {}, label), input);
   }
 
+  // One accessible fuzzy-search/autocomplete controller is shared by every
+  // tile picker. Future search fields (such as app selection) can reuse the
+  // same candidate shape: { label, description, fields, node, submit }.
+  let searchControlId = 0;
+  function tileSearchControl(searchKey, ariaLabel, candidates, grid) {
+    const controlId = `tile-search-${++searchControlId}`;
+    const listId = `${controlId}-list`;
+    const input = el("input", {
+      id: controlId,
+      class: "tile-search-input",
+      type: "search",
+      value: ui.search[searchKey] || "",
+      placeholder: "Search…",
+      autocomplete: "off",
+      spellcheck: "false",
+      role: "combobox",
+      "aria-label": ariaLabel,
+      "aria-autocomplete": "list",
+      "aria-expanded": "false",
+      "aria-controls": listId,
+    });
+    const clear = el("button", { class: "search-clear", type: "button", "aria-label": "Clear search" }, "×");
+    const list = el("div", { id: listId, class: "search-suggestions", role: "listbox", hidden: true });
+    const wrap = el(
+      "div",
+      { class: "tile-search" },
+      el("span", { class: "search-icon", "aria-hidden": "true" }, "⌕"),
+      input,
+      clear,
+      list
+    );
+
+    let ranked = [];
+    let suggestions = [];
+    let activeIndex = -1;
+    let open = false;
+    let committing = false;
+
+    function paintActive() {
+      const options = [...list.querySelectorAll('[role="option"]:not([aria-disabled="true"])')];
+      options.forEach((option, index) => {
+        const active = index === activeIndex;
+        option.classList.toggle("active", active);
+        option.setAttribute("aria-selected", String(active));
+      });
+      const active = options[activeIndex];
+      if (active) input.setAttribute("aria-activedescendant", active.id);
+      else input.removeAttribute("aria-activedescendant");
+    }
+
+    function renderSuggestions() {
+      list.replaceChildren();
+      input.setAttribute("aria-expanded", String(open));
+      if (!open) {
+        list.hidden = true;
+        input.removeAttribute("aria-activedescendant");
+        return;
+      }
+
+      list.hidden = false;
+      if (!suggestions.length) {
+        list.append(
+          el(
+            "div",
+            { class: "search-empty", role: "option", "aria-disabled": "true" },
+            candidates.length ? "No matching destinations" : "No destinations available"
+          )
+        );
+        input.removeAttribute("aria-activedescendant");
+        return;
+      }
+
+      suggestions.forEach((entry, index) => {
+        const candidate = entry.item;
+        const option = el(
+          "div",
+          {
+            id: `${listId}-option-${index}`,
+            class: "search-option",
+            role: "option",
+            "aria-selected": "false",
+            onmouseenter: () => {
+              activeIndex = index;
+              paintActive();
+            },
+            onmousedown: (event) => event.preventDefault(),
+            onclick: () => commit(entry),
+          },
+          el("span", { class: "search-option-label" }, candidate.label),
+          candidate.description
+            ? el("span", { class: "search-option-meta" }, candidate.description)
+            : null
+        );
+        list.append(option);
+      });
+      paintActive();
+    }
+
+    function applyQuery(query, showSuggestions) {
+      ui.search[searchKey] = query;
+      ranked = FuzzySearch.rank(query, candidates, (candidate) => candidate.fields);
+      const hasQuery = !!FuzzySearch.normalize(query).trim();
+
+      ranked.forEach((entry) => {
+        entry.item.node.classList.toggle("search-miss", hasQuery && !entry.matched);
+        entry.item.node.classList.toggle("search-match", hasQuery && entry.matched);
+        grid.append(entry.item.node);
+      });
+
+      suggestions = hasQuery ? ranked.filter((entry) => entry.matched).slice(0, 7) : [];
+      clear.hidden = !hasQuery;
+      open = hasQuery && !!showSuggestions;
+      activeIndex = open && suggestions.length ? 0 : -1;
+      renderSuggestions();
+    }
+
+    function commit(entry) {
+      if (committing || !entry || !entry.item) return;
+      committing = true;
+      input.value = entry.item.label;
+      applyQuery(entry.item.label, false);
+      entry.item.submit();
+      setTimeout(() => {
+        committing = false;
+      }, 0);
+    }
+
+    input.addEventListener("input", () => applyQuery(input.value, true));
+    input.addEventListener("focus", () => {
+      if (FuzzySearch.normalize(input.value).trim()) {
+        open = true;
+        if (suggestions.length && activeIndex < 0) activeIndex = 0;
+        renderSuggestions();
+      }
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && open) {
+        event.preventDefault();
+        open = false;
+        activeIndex = -1;
+        renderSuggestions();
+        return;
+      }
+
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        if (!suggestions.length) return;
+        event.preventDefault();
+        if (!open) {
+          open = true;
+          activeIndex = 0;
+        } else {
+          const delta = event.key === "ArrowDown" ? 1 : -1;
+          activeIndex = (activeIndex + delta + suggestions.length) % suggestions.length;
+        }
+        renderSuggestions();
+        return;
+      }
+
+      if ((event.key === "Enter" || event.key === "Tab") && open && activeIndex >= 0) {
+        event.preventDefault();
+        commit(suggestions[activeIndex]);
+      }
+    });
+    clear.addEventListener("click", () => {
+      input.value = "";
+      applyQuery("", false);
+      input.focus();
+    });
+    wrap.addEventListener("focusout", () => {
+      setTimeout(() => {
+        if (!wrap.contains(document.activeElement)) {
+          open = false;
+          activeIndex = -1;
+          renderSuggestions();
+        }
+      }, 0);
+    });
+
+    applyQuery(input.value, false);
+    return wrap;
+  }
+
+  function classSearchFields(loc, building, klass) {
+    return [
+      klass.name,
+      klass.id,
+      klass.instructor,
+      klass.room,
+      klass.room ? `room ${klass.room}` : "",
+      klass.room ? `classroom ${klass.room}` : "",
+      building.name,
+      building.id,
+      loc.name,
+      loc.id,
+    ];
+  }
+
   // ------------------------------------------------------------------ monitor
   function renderMonitor() {
     const c = el("div", { class: "monitor" });
@@ -487,73 +695,170 @@
   function crumb(label, onclick) {
     return el("button", { class: "crumb" + (onclick ? "" : " current"), onclick: onclick || (() => {}) }, label);
   }
-  function setDrill(loc, bld, cls) {
+  function setDrill(loc, bld, cls, focusNext) {
     nav.locationId = loc;
     nav.buildingId = bld;
     nav.classId = cls;
     syncUrl();
     render();
+    if (focusNext) {
+      requestAnimationFrame(() => {
+        const nextSearch = document.querySelector(".tile-search-input");
+        if (nextSearch) {
+          nextSearch.focus();
+          return;
+        }
+        const heading = document.querySelector(".class-header h2");
+        if (heading) {
+          heading.tabIndex = -1;
+          heading.focus();
+        }
+      });
+    }
   }
 
   function pickerLocations() {
     const grid = el("div", { class: "tiles" });
+    const candidates = [];
     if (!D.org.length) grid.append(emptyNote("No locations yet. Ask an admin to add one, or start an agent."));
     for (const loc of D.org) {
       const devs = devicesInLocation(loc.id);
-      grid.append(
-        tile(loc.name, "🏫", [
+      const node = tile(
+        loc.name,
+        "🏫",
+        [
           `${loc.buildings.length} building(s)`,
           `${onlineCount(devs)}/${devs.length} online`,
-        ], () => setDrill(loc.id, null, null))
+        ],
+        () => setDrill(loc.id, null, null)
       );
+      const fields = [
+        loc.name,
+        loc.id,
+        `${loc.buildings.length} buildings`,
+        `${onlineCount(devs)}/${devs.length} online`,
+      ];
+      for (const building of loc.buildings) {
+        fields.push(building.name, building.id);
+        for (const klass of building.classes) fields.push(...classSearchFields(loc, building, klass));
+      }
+      candidates.push({
+        label: loc.name,
+        description: `${loc.buildings.length} building(s) · ${onlineCount(devs)}/${devs.length} online`,
+        fields,
+        node,
+        submit: () => setDrill(loc.id, null, null, true),
+      });
+      grid.append(node);
     }
-    return section("Select a location", grid);
+    const search = tileSearchControl("locations", "Search locations", candidates, grid);
+    return section("Select a location", grid, search);
   }
 
   function pickerBuildings() {
     const loc = locationById(nav.locationId);
     const grid = el("div", { class: "tiles" });
+    const candidates = [];
     if (!loc || !loc.buildings.length) grid.append(emptyNote("No buildings in this location yet."));
     for (const b of loc ? loc.buildings : []) {
       const devs = devicesInBuilding(b.id);
       const locked = !DEMO && b.code && !ui.unlocked[b.id];
-      grid.append(
-        tile(
-          b.name,
-          locked ? "🔒" : "🏢",
-          [`${b.classes.length} class(es)`, `${onlineCount(devs)}/${devs.length} online`, locked ? "Code required" : ""].filter(Boolean),
-          () => (locked ? openBuildingGate(loc, b) : setDrill(nav.locationId, b.id, null))
-        )
+      const node = tile(
+        b.name,
+        locked ? "🔒" : "🏢",
+        [`${b.classes.length} class(es)`, `${onlineCount(devs)}/${devs.length} online`, locked ? "Code required" : ""].filter(Boolean),
+        () => (locked ? openBuildingGate(loc, b) : setDrill(nav.locationId, b.id, null))
       );
+      const fields = [
+        b.name,
+        b.id,
+        loc.name,
+        loc.id,
+        `${b.classes.length} classes`,
+        `${onlineCount(devs)}/${devs.length} online`,
+        locked ? "code required" : "",
+      ];
+      for (const klass of b.classes) fields.push(...classSearchFields(loc, b, klass));
+      candidates.push({
+        label: b.name,
+        description: `${loc.name} · ${b.classes.length} class(es)`,
+        fields,
+        node,
+        submit: () =>
+          locked ? openBuildingGate(loc, b) : setDrill(nav.locationId, b.id, null, true),
+      });
+      grid.append(node);
     }
-    return section("Select a building", grid);
+    const search = tileSearchControl(
+      `buildings:${nav.locationId}`,
+      `Search buildings in ${loc ? loc.name : "this location"}`,
+      candidates,
+      grid
+    );
+    return section("Select a building", grid, search);
   }
 
   function pickerClasses() {
     const f = buildingById(nav.buildingId);
     const grid = el("div", { class: "tiles" });
+    const candidates = [];
     const classes = f ? f.b.classes : [];
     for (const c of classes) {
       const devs = devicesInClass(c.id);
-      grid.append(
-        tile(
-          c.name,
-          "💻",
-          [c.instructor ? `👤 ${c.instructor}` : "No instructor set", c.room || "", `${onlineCount(devs)}/${devs.length} online`].filter(Boolean),
-          () => setDrill(nav.locationId, nav.buildingId, c.id)
-        )
+      const node = tile(
+        c.name,
+        "💻",
+        [c.instructor ? `👤 ${c.instructor}` : "No instructor set", c.room || "", `${onlineCount(devs)}/${devs.length} online`].filter(Boolean),
+        () => setDrill(nav.locationId, nav.buildingId, c.id)
       );
+      candidates.push({
+        label: c.name,
+        description: [c.instructor, c.room, `${onlineCount(devs)}/${devs.length} online`].filter(Boolean).join(" · "),
+        fields: [
+          ...classSearchFields(f.loc, f.b, c),
+          c.instructor ? `instructor ${c.instructor}` : "no instructor set",
+          `${onlineCount(devs)}/${devs.length} online`,
+        ],
+        node,
+        submit: () => setDrill(nav.locationId, nav.buildingId, c.id, true),
+      });
+      grid.append(node);
     }
     const un = f ? unassignedInBuilding(f.b.id) : [];
-    if (un.length)
-      grid.append(
-        tile("Unassigned computers", "❓", [`${onlineCount(un)}/${un.length} online`, "Not yet in a class"], () =>
-          setDrill(nav.locationId, nav.buildingId, UNASSIGNED)
-        )
+    if (un.length) {
+      const node = tile(
+        "Unassigned computers",
+        "❓",
+        [`${onlineCount(un)}/${un.length} online`, "Not yet in a class"],
+        () => setDrill(nav.locationId, nav.buildingId, UNASSIGNED)
       );
+      candidates.push({
+        label: "Unassigned computers",
+        description: `${onlineCount(un)}/${un.length} online · ${f.b.name}`,
+        fields: [
+          "unassigned",
+          "computers",
+          "not yet in a class",
+          `${onlineCount(un)}/${un.length} online`,
+          f.b.name,
+          f.b.id,
+          f.loc.name,
+          f.loc.id,
+        ],
+        node,
+        submit: () => setDrill(nav.locationId, nav.buildingId, UNASSIGNED, true),
+      });
+      grid.append(node);
+    }
     if (!classes.length && !un.length)
       grid.append(emptyNote("No classes here yet. An admin can add one in the Admin panel."));
-    return section("Select a class", grid);
+    const search = tileSearchControl(
+      `classes:${nav.buildingId}`,
+      `Search classes and classrooms in ${f ? f.b.name : "this building"}`,
+      candidates,
+      grid
+    );
+    return section("Select a class", grid, search);
   }
 
   function tile(title, icon, lines, onclick) {

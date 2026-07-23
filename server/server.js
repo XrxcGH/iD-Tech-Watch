@@ -309,6 +309,9 @@ const devices = new Map(); // deviceId -> record
 const agentWs = new Map(); // deviceId -> WSConn
 const wsDevice = new Map(); // WSConn -> deviceId
 const dashboards = new Set(); // authenticated WSConns { role }
+// Enforced warning/transition overlays are authoritative on the hub while it
+// is running. Informational messages remain dismissible one-shot commands.
+const activeMessages = new Map(); // deviceId -> { id, kind, text, expires_at }
 
 function registerAgent(ws, info) {
   const deviceId = String(info.device_id || `unknown-${Date.now()}`);
@@ -396,6 +399,13 @@ function orgView() {
   }));
 }
 
+function activeMessageFor(deviceId) {
+  const message = activeMessages.get(deviceId);
+  if (!message) return null;
+  if (message.expires_at && message.expires_at <= Date.now() / 1000) return null;
+  return { ...message };
+}
+
 function devicesView() {
   const out = {};
   for (const rec of devices.values()) {
@@ -413,6 +423,7 @@ function devicesView() {
       blocked: rec.blocked,
       blockedSites: rec.blockedSites || [],
       sitesAvailable: rec.sitesAvailable,
+      activeMessage: activeMessageFor(rec.device_id),
     };
   }
   return out;
@@ -438,23 +449,101 @@ function broadcastState() {
 }
 
 // ---- command routing -----------------------------------------------------
-function targetsFor(target) {
+function matchesTarget(deviceId, rec, target) {
   const scope = (target && target.scope) || "device";
+  if (scope === "all") return true;
+  if (scope === "device") return deviceId === target.deviceId;
+  if (scope === "location") return rec.locationId === target.locationId;
+  if (scope === "building") return rec.buildingId === target.buildingId;
+  if (scope === "class") return deviceClassId(deviceId, rec.buildingId) === target.classId;
+  return false;
+}
+
+function deviceIdsFor(target) {
   const out = [];
-  for (const [deviceId, ws] of agentWs) {
-    const rec = devices.get(deviceId);
-    if (!rec) continue;
-    if (scope === "all") out.push(ws);
-    else if (scope === "device" && deviceId === target.deviceId) out.push(ws);
-    else if (scope === "location" && rec.locationId === target.locationId) out.push(ws);
-    else if (scope === "building" && rec.buildingId === target.buildingId) out.push(ws);
-    else if (scope === "class" && deviceClassId(deviceId, rec.buildingId) === target.classId)
-      out.push(ws);
+  for (const [deviceId, rec] of devices) {
+    if (matchesTarget(deviceId, rec, target || {})) out.push(deviceId);
   }
   return out;
 }
 
+function targetsFor(target) {
+  return deviceIdsFor(target)
+    .map((deviceId) => agentWs.get(deviceId))
+    .filter(Boolean);
+}
+
+const MESSAGE_KINDS = new Set(["info", "warning", "transition"]);
+function normalizeMessageParams(params) {
+  const source = params || {};
+  const kind = MESSAGE_KINDS.has(source.kind) ? source.kind : "info";
+  const text = String(source.text || "").trim().slice(0, 4000);
+  const requestedTimeout = Number(source.timeout_sec);
+  const timeout_sec = Number.isFinite(requestedTimeout)
+    ? Math.max(0, Math.min(86400, Math.floor(requestedTimeout)))
+    : 0;
+  return { kind, text, timeout_sec };
+}
+
+function sendMessageState(deviceId) {
+  const ws = agentWs.get(deviceId);
+  if (!ws) return false;
+  ws.sendJSON({
+    type: "command",
+    action: "message_state",
+    params: { message: activeMessageFor(deviceId) },
+  });
+  return true;
+}
+
 function sendCommand(target, action, params) {
+  if (action === "message") {
+    const message = normalizeMessageParams(params);
+    if (!message.text) return 0;
+
+    if (message.kind === "warning" || message.kind === "transition") {
+      const deviceIds = deviceIdsFor(target);
+      const authoritative = {
+        id: genId("msg"),
+        kind: message.kind,
+        text: message.text,
+        expires_at: message.timeout_sec ? Date.now() / 1000 + message.timeout_sec : 0,
+      };
+      let sent = 0;
+      for (const deviceId of deviceIds) {
+        activeMessages.set(deviceId, authoritative);
+        if (sendMessageState(deviceId)) sent++;
+      }
+      console.log(
+        `[hub] ${message.kind} message ${authoritative.id} activated for ${deviceIds.length} computer(s)`
+      );
+      broadcastState();
+      return sent;
+    }
+
+    const command = { type: "command", action: "message", params: message };
+    let sent = 0;
+    for (const ws of targetsFor(target)) {
+      ws.sendJSON(command);
+      sent++;
+    }
+    console.log(`[hub] informational message sent to ${sent} computer(s)`);
+    return sent;
+  }
+
+  if (action === "clear_message") {
+    const deviceIds = deviceIdsFor(target);
+    let sent = 0;
+    let changed = false;
+    for (const deviceId of deviceIds) {
+      if (activeMessages.delete(deviceId)) changed = true;
+      if (sendMessageState(deviceId)) sent++;
+    }
+    console.log(`[hub] enforced message cleared for ${deviceIds.length} computer(s)`);
+    if (changed) broadcastState();
+    return sent;
+  }
+
   const command = { type: "command", action, params: params || {} };
   let sent = 0;
   for (const ws of targetsFor(target)) {
@@ -624,12 +713,19 @@ function handleAgent(ws) {
       const id = registerAgent(ws, msg);
       registered = true;
       console.log(`[hub] agent online: ${id} (${msg.location} / ${msg.building})`);
+      // The hub is authoritative: every registration receives either the
+      // currently active enforced message or an explicit null that clears a
+      // stale local overlay after reconnecting.
+      sendMessageState(id);
       broadcastState();
       return;
     }
     if (msg.type === "status") {
       updateDevice(ws, msg);
       broadcastState();
+    } else if (msg.type === "message_state_request") {
+      const id = wsDevice.get(ws);
+      if (id) sendMessageState(id);
     }
   };
   ws.onclose = () => {
@@ -689,6 +785,7 @@ function handleDashboard(ws) {
 // ==========================================================================
 const STATIC_ROUTES = {
   "/": { file: "index.html", type: "text/html; charset=utf-8" },
+  "/fuzzy-search.js": { file: "fuzzy-search.js", type: "text/javascript; charset=utf-8" },
   "/app.js": { file: "app.js", type: "text/javascript; charset=utf-8" },
   "/style.css": { file: "style.css", type: "text/css; charset=utf-8" },
 };
@@ -846,6 +943,22 @@ function keepAwake() {
   }
 }
 
+function expireActiveMessages() {
+  const now = Date.now() / 1000;
+  const expired = [];
+  for (const [deviceId, message] of activeMessages) {
+    if (message.expires_at && message.expires_at <= now) {
+      activeMessages.delete(deviceId);
+      expired.push(deviceId);
+      sendMessageState(deviceId);
+    }
+  }
+  if (expired.length) {
+    console.log(`[hub] enforced message timeout cleared ${expired.length} computer(s)`);
+    broadcastState();
+  }
+}
+
 // Fire scheduled events (daily timed closures/pauses/etc). Checks every 20s;
 // the per-minute lastFired stamp prevents double-firing within a minute.
 function pad2(n) {
@@ -874,6 +987,7 @@ function checkSchedules() {
 }
 
 loadConfig();
+setInterval(expireActiveMessages, 1000);
 setInterval(checkSchedules, 20000);
 if (process.env.IDT_KEEP_AWAKE === "1") keepAwake();
 server.listen(PORT, HOST, () => {
