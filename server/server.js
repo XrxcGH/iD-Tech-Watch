@@ -62,6 +62,22 @@ function loadConfig() {
     config.layouts ||= {};
     config.schedules ||= [];
     config.auth ||= {};
+    let migratedTimeouts = 0;
+    for (const schedule of config.schedules) {
+      for (const command of schedule.commands || []) {
+        if (
+          command.action === "message" &&
+          command.params &&
+          command.params.timeout_sec === 0
+        ) {
+          delete command.params.timeout_sec;
+          migratedTimeouts++;
+        }
+      }
+    }
+    if (migratedTimeouts) {
+      console.log(`[hub] migrated ${migratedTimeouts} legacy no-timeout scheduled message(s)`);
+    }
   } catch (_) {
     // first run — seed a Stanford location so the UI isn't empty
     config = {

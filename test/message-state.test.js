@@ -109,6 +109,32 @@ test("enforced message state is authoritative across clear, reconnect, and timeo
 
   const repo = path.join(__dirname, "..");
   const tempDir = fs.mkdtempSync(path.join(repo, ".message-test-"));
+  const configPath = path.join(tempDir, "config.json");
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({
+      locations: [],
+      assignments: {},
+      layouts: {},
+      schedules: [
+        {
+          id: "legacy-timeout",
+          name: "Legacy no-timeout message",
+          time: "00:00",
+          days: [],
+          target: { scope: "all" },
+          commands: [
+            {
+              action: "message",
+              params: { kind: "warning", text: "Legacy message", timeout_sec: 0 },
+            },
+          ],
+          enabled: false,
+        },
+      ],
+      auth: {},
+    })
+  );
   const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const hub = spawn(process.execPath, ["server/server.js"], {
@@ -118,7 +144,7 @@ test("enforced message state is authoritative across clear, reconnect, and timeo
       HOST: "127.0.0.1",
       PORT: String(port),
       IDT_ADMIN_PASSWORD: "message-test-password",
-      IDT_CONFIG_PATH: path.join(tempDir, "config.json"),
+      IDT_CONFIG_PATH: configPath,
     },
     stdio: "ignore",
   });
@@ -126,6 +152,17 @@ test("enforced message state is authoritative across clear, reconnect, and timeo
 
   try {
     await waitForHub(baseUrl);
+    let migratedConfig = null;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      migratedConfig = JSON.parse(fs.readFileSync(configPath, "utf8"));
+      const legacyParams = migratedConfig.schedules[0].commands[0].params;
+      if (!Object.hasOwn(legacyParams, "timeout_sec")) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(
+      Object.hasOwn(migratedConfig.schedules[0].commands[0].params, "timeout_sec"),
+      false
+    );
 
     const agent = await openSocket(`ws://127.0.0.1:${port}/ws/agent`);
     sockets.push(agent.ws);
