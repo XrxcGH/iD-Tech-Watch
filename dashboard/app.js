@@ -585,7 +585,12 @@
       fields.append(labeled("Admin password", passwordInput));
     } else {
       if (D.instructorCodeRequired) {
-        codeInput = el("input", { type: "text", placeholder: "Access code from your admin", autofocus: true });
+        codeInput = el("input", {
+          type: "password",
+          placeholder: "Access code from your admin",
+          autocomplete: "current-password",
+          autofocus: true,
+        });
         fields.append(labeled("Instructor access code", codeInput));
       } else {
         fields.append(
@@ -2131,7 +2136,7 @@
             }),
             el("label", { class: "code-field", title: "4-digit instructor code for this building" },
               el("span", {}, "Code"),
-              el("input", { class: "code-mini", type: "text", inputmode: "numeric", maxlength: "4", value: b.code || "8676", onchange: (e) => org({ op: "setBuildingCode", id: b.id, code: e.target.value }) })
+              el("input", { class: "code-mini", type: "password", inputmode: "numeric", maxlength: "4", value: b.code || "8676", autocomplete: "new-password", onchange: (e) => org({ op: "setBuildingCode", id: b.id, code: e.target.value }) })
             ),
             el("button", { class: "btn ghost sm danger", onclick: () => confirmDel("building", b.name, () => org({ op: "deleteBuilding", id: b.id })) }, "Delete")
           )
@@ -2271,7 +2276,7 @@
     );
 
     // instructor code
-    const codeInput = el("input", { type: "text", placeholder: D.instructorCodeRequired ? "•••••• (set)" : "Leave blank to disable" });
+    const codeInput = el("input", { type: "password", autocomplete: "new-password", placeholder: D.instructorCodeRequired ? "•••••• (set)" : "Leave blank to disable" });
     const saveCode = () => {
       org({ op: "setInstructorCode", code: codeInput.value.trim() });
       toast(codeInput.value.trim() ? "Instructor access code set." : "Instructor access code disabled.");
@@ -2336,7 +2341,7 @@
   function openBuildingGate(loc, b, classId = null) {
     const o = ensureOverlay();
     o.innerHTML = "";
-    const input = el("input", { class: "code-input", type: "text", inputmode: "numeric", maxlength: "4", placeholder: "••••", autocomplete: "off" });
+    const input = el("input", { class: "code-input", type: "password", inputmode: "numeric", maxlength: "4", placeholder: "••••", autocomplete: "off" });
     const err = el("div", { class: "code-err" });
     const sheet = el("div", { class: "sheet code-sheet" });
     sheet.addEventListener("click", (e) => e.stopPropagation());
