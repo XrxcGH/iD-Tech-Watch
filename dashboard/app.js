@@ -9,6 +9,17 @@
 (() => {
   "use strict";
 
+  const THEME_KEY = "idt_theme";
+  let theme = localStorage.getItem(THEME_KEY) === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = theme;
+
+  function toggleTheme() {
+    theme = theme === "dark" ? "light" : "dark";
+    localStorage.setItem(THEME_KEY, theme);
+    document.documentElement.dataset.theme = theme;
+    render();
+  }
+
   // --------------------------------------------------------------- tiny DOM
   function el(tag, attrs, ...children) {
     const node = document.createElement(tag);
@@ -452,6 +463,22 @@
     );
   }
 
+  function themeButton(extraClass = "") {
+    const dark = theme === "dark";
+    return el(
+      "button",
+      {
+        class: `theme-toggle${extraClass ? ` ${extraClass}` : ""}`,
+        type: "button",
+        onclick: toggleTheme,
+        title: dark ? "Use light mode" : "Use dark mode",
+        "aria-label": dark ? "Use light mode" : "Use dark mode",
+        "aria-pressed": String(dark),
+      },
+      dark ? "☀" : "☾"
+    );
+  }
+
   function renderShell(content) {
     const wrap = el("div", { class: "app-shell" });
 
@@ -482,6 +509,7 @@
       right.append(el("button", { class: "navlink", onclick: () => location.assign("/demo") }, "Demo"));
     }
     right.append(
+      themeButton(),
       el("span", { class: "role-badge " + auth.role }, auth.role === "admin" ? "Admin" : "Instructor"),
       connDot(),
       !DEMO ? el("button", { class: "btn ghost sm", onclick: logout }, "Sign out") : null
@@ -588,6 +616,7 @@
     return el(
       "div",
       { class: "login-page" },
+      themeButton("login-theme-toggle"),
       el(
         "div",
         { class: "login-inner" },

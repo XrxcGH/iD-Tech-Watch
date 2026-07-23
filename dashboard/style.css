@@ -1,25 +1,53 @@
-/* iD Tech Classroom Monitor — theme.
- * Brand palette: iD Green (#94D60A) + pure white + pure black text.
- * Green is used as fills (buttons, badges, dots, logo) with black text on top;
- * body text and links are black on white. A darkened brand green (--brand-ink)
- * is used where green text must sit on white and still meet contrast.
- * A functional red (--danger) is kept for destructive actions only. */
+/* Gruvbox-inspired dark theme. */
 :root {
+  color-scheme: light;
   --id-green: #94d60a;
-  --id-green-dark: #7ab705; /* button hover fill */
-  --brand-ink: #3f6d00; /* accessible green for text/links on white */
+  --id-green-dark: #7ab705;
+  --brand-ink: #3f6d00;
   --id-green-soft: rgba(148, 214, 10, 0.16);
-  --ink: #000000; /* pure black — primary text */
+  --ink: #000;
   --muted: #5f6368;
   --line: #e5e7e9;
   --bg: #f4f5f6;
-  --card: #ffffff;
+  --card: #fff;
+  --card-raised: #fff;
+  --input: #fff;
   --ok: #3f6d00;
   --ok-dot: #6fbf00;
   --off: #9aa0a6;
   --danger: #d92d20;
+  --warning: #8a5a00;
+  --focus: #94d60a;
+  --instructor-bg: rgba(0, 0, 0, 0.07);
+  --instructor-ink: #000;
+  --grid-line: rgba(0, 0, 0, 0.04);
   --radius: 12px;
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 6px 20px rgba(0, 0, 0, 0.06);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --id-green: #b8bb26;
+  --id-green-dark: #98971a;
+  --brand-ink: #d8db4b;
+  --id-green-soft: rgba(184, 187, 38, 0.14);
+  --ink: #ebdbb2;
+  --muted: #a89984;
+  --line: #504945;
+  --bg: #1d2021;
+  --card: #282828;
+  --card-raised: #32302f;
+  --input: #1d2021;
+  --ok: #b8bb26;
+  --ok-dot: #b8bb26;
+  --off: #7c6f64;
+  --danger: #fb4934;
+  --warning: #fabd2f;
+  --focus: #fabd2f;
+  --instructor-bg: rgba(250, 189, 47, 0.12);
+  --instructor-ink: #fabd2f;
+  --grid-line: rgba(235, 219, 178, 0.055);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 24px rgba(0, 0, 0, 0.22);
 }
 
 * {
@@ -1390,4 +1418,166 @@ details.apps .procs {
   .brand-sub {
     display: none;
   }
+}
+
+/* ------------------------------------------------------- Gruvbox surfaces */
+input,
+select,
+textarea,
+.block-select {
+  background: var(--input);
+}
+
+option {
+  background: var(--card);
+  color: var(--ink);
+}
+
+.btn {
+  background: var(--card-raised);
+}
+
+.btn.primary,
+.logo,
+.day-btn.active,
+.demo-badge,
+.download-fab {
+  color: #1d2021;
+}
+
+:root[data-theme="dark"] .login-page {
+  background:
+    radial-gradient(900px 500px at 50% -10%, rgba(184, 187, 38, 0.12), transparent 62%),
+    var(--bg);
+}
+
+:root[data-theme="dark"] .login-inner {
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .login-tagline {
+  color: var(--muted);
+}
+
+.login-card,
+.login-tab.active,
+.topbar,
+.search-suggestions,
+.seg-btn.active,
+.seat,
+.sheet,
+.org-bld {
+  background: var(--card);
+  color: var(--ink);
+}
+
+.login-tabs,
+.org-loc,
+.add-row td,
+.sched-form {
+  background: var(--card-raised);
+}
+
+:root[data-theme="dark"] .topbar {
+  box-shadow: 0 1px 0 rgba(235, 219, 178, 0.04), 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+.role-badge.instructor {
+  background: var(--instructor-bg);
+  color: var(--instructor-ink);
+}
+
+:root[data-theme="dark"] .conn.offline {
+  background: rgba(124, 111, 100, 0.18);
+}
+
+:root[data-theme="dark"] .tile:hover {
+  box-shadow: 0 6px 18px rgba(184, 187, 38, 0.16);
+}
+
+.rule-source.manual {
+  background: var(--card-raised);
+}
+
+.inventory-freshness.current {
+  color: var(--ok);
+}
+
+:root[data-theme="dark"] .chip.site {
+  background: rgba(131, 165, 152, 0.12);
+  color: #83a598;
+}
+
+.warn,
+.message-status.transition {
+  color: var(--warning);
+  background: rgba(250, 189, 47, 0.1);
+  border-color: rgba(250, 189, 47, 0.32);
+}
+
+.message-status.transition {
+  border-left-color: var(--warning);
+}
+
+:root[data-theme="dark"] .list .row {
+  border-bottom-color: rgba(235, 219, 178, 0.07);
+}
+
+.room {
+  background-color: var(--input);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+}
+
+:root[data-theme="dark"] .sheet-backdrop {
+  background: rgba(20, 18, 17, 0.76);
+  backdrop-filter: blur(2px);
+}
+
+:root[data-theme="dark"] .toast {
+  background: var(--card-raised);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--id-green);
+}
+
+::selection {
+  background: rgba(250, 189, 47, 0.28);
+  color: var(--ink);
+}
+
+* {
+  scrollbar-color: var(--line) var(--input);
+}
+
+.theme-toggle {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--card-raised);
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.theme-toggle:hover {
+  border-color: var(--id-green);
+  background: var(--id-green-soft);
+}
+
+.theme-toggle:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--focus) 45%, transparent);
+  outline-offset: 2px;
+}
+
+.login-theme-toggle {
+  position: fixed;
+  top: 16px;
+  right: 16px;
 }
