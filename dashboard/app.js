@@ -942,13 +942,13 @@
         "button",
         {
           class: "btn",
-          onclick: () => {
-            const t = prompt("Message to show on every screen in this class:");
-            if (t && t.trim()) runAll("message", { text: t.trim() });
-          },
+          onclick: () => openMessageComposer(runAll, isUn ? "these computers" : "this class"),
         },
         "Message class"
-      )
+      ),
+      devs.some((device) => device.activeMessage)
+        ? el("button", { class: "btn", onclick: () => runAll("clear_message", {}) }, "Clear message")
+        : null
     );
 
     const sorted = devs.slice().sort((a, b) => a.hostname.toLowerCase().localeCompare(b.hostname.toLowerCase()));
@@ -1029,7 +1029,10 @@
       el("span", { class: "seat-dot " + (d.online ? "on" : "off") }),
       el("div", { class: "seat-screen" }, "💻"),
       el("div", { class: "seat-name" }, d.hostname),
-      blockedCount ? el("span", { class: "seat-badge" }, "⛔ " + blockedCount) : null
+      blockedCount ? el("span", { class: "seat-badge" }, "⛔ " + blockedCount) : null,
+      d.activeMessage
+        ? el("span", { class: "seat-message", title: MESSAGE_KIND_LABELS[d.activeMessage.kind] || "Classroom message" }, "💬")
+        : null
     );
     node.style.left = pos.x * 100 + "%";
     node.style.top = pos.y * 100 + "%";
@@ -1086,6 +1089,116 @@
       o.innerHTML = "";
     }
   }
+
+  const MESSAGE_KIND_LABELS = {
+    info: "Information",
+    warning: "Student warning",
+    transition: "Transition time",
+  };
+
+  function messageStatus(message) {
+    if (!message) return null;
+    const label = MESSAGE_KIND_LABELS[message.kind] || "Classroom message";
+    let timing = "Until cleared";
+    if (message.expires_at) {
+      const seconds = Math.max(0, Math.ceil(message.expires_at - Date.now() / 1000));
+      timing = `${seconds}s remaining`;
+    }
+    return el(
+      "div",
+      { class: `message-status ${message.kind || "info"}` },
+      el("span", { class: "message-status-label" }, `💬 ${label}`),
+      el("span", { class: "message-status-time" }, timing)
+    );
+  }
+
+  function openMessageComposer(dispatch, targetLabel) {
+    const o = ensureOverlay();
+    o.innerHTML = "";
+    const kind = el(
+      "select",
+      { "aria-label": "Classroom message type" },
+      el("option", { value: "info" }, "Informational message"),
+      el("option", { value: "warning" }, "Student warning"),
+      el("option", { value: "transition" }, "Transition-time message")
+    );
+    const text = el("textarea", {
+      rows: "6",
+      maxlength: "4000",
+      placeholder: "Type the classroom message students should see…",
+      "aria-label": "Classroom message text",
+    });
+    const timeout = el("input", {
+      type: "number",
+      min: "0",
+      max: "86400",
+      step: "1",
+      value: "0",
+      "aria-label": "Message timeout in seconds",
+    });
+    const help = el("p", { class: "message-help" });
+
+    function updateHelp() {
+      if (kind.value === "info") {
+        help.textContent =
+          "Students receive a full-screen iD Tech message with a Dismiss button. A timeout is optional.";
+      } else {
+        help.textContent =
+          "Students cannot dismiss this full-screen message. Use Clear message, or enter a timeout in seconds.";
+      }
+    }
+    kind.addEventListener("change", updateHelp);
+    updateHelp();
+
+    const sendMessage = () => {
+      const body = text.value.trim();
+      if (!body) {
+        toast("Enter a message first.");
+        text.focus();
+        return;
+      }
+      const seconds = Math.max(0, Math.min(86400, parseInt(timeout.value, 10) || 0));
+      dispatch("message", { kind: kind.value, text: body, timeout_sec: seconds });
+      closeOverlay();
+      toast(`${MESSAGE_KIND_LABELS[kind.value]} sent to ${targetLabel}.`);
+    };
+
+    const sheet = el(
+      "div",
+      { class: "sheet message-compose", role: "dialog", "aria-modal": "true", "aria-labelledby": "message-compose-title" },
+      el(
+        "div",
+        { class: "sheet-head" },
+        el("span", { id: "message-compose-title", class: "sheet-title" }, `Message ${targetLabel}`),
+        el("span", { class: "spacer" }),
+        el("button", { class: "btn ghost sm", onclick: closeOverlay, "aria-label": "Close message composer" }, "✕")
+      ),
+      el("label", { class: "field" }, el("span", {}, "Message type"), kind),
+      el("label", { class: "field" }, el("span", {}, "Message"), text),
+      el(
+        "label",
+        { class: "field" },
+        el("span", {}, "Timeout in seconds (0 = dismissed or cleared manually)"),
+        timeout
+      ),
+      help,
+      el(
+        "div",
+        { class: "sheet-actions message-compose-actions" },
+        el("button", { class: "btn ghost", onclick: closeOverlay }, "Cancel"),
+        el("button", { class: "btn primary", onclick: sendMessage }, "Show full-screen message")
+      )
+    );
+    sheet.addEventListener("click", (event) => event.stopPropagation());
+    sheet.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeOverlay();
+      if (event.key === "Enter" && event.ctrlKey) sendMessage();
+    });
+    o.append(el("div", { class: "sheet-backdrop", onclick: closeOverlay }), sheet);
+    o.classList.add("open");
+    setTimeout(() => text.focus(), 30);
+  }
+
   function openDevicePanel(d) {
     const t = { scope: "device", deviceId: d.device_id };
     const dispatch = (a, p) => command(t, a, p);
@@ -1106,6 +1219,8 @@
       ),
       el("div", { class: "sheet-sub" }, `${(d.windows || []).length} open window(s) · ${(d.processes || []).length} apps · ${d.online ? "online" : "offline"}`)
     );
+
+    if (d.activeMessage) sheet.append(messageStatus(d.activeMessage));
 
     const left = (exp) => (exp > 0 ? ` (${Math.max(0, Math.round(exp - Date.now() / 1000))}s)` : "");
     if ((d.blocked || []).length || (d.blockedSites || []).length) {
@@ -1132,6 +1247,9 @@
         el("button", { class: "btn sm", onclick: () => command(t, "pause", { text: "Paused by your instructor — eyes up front." }) }, "⏸ Pause"),
         el("button", { class: "btn sm", onclick: () => command(t, "resume", {}) }, "▶ Resume"),
         el("button", { class: "btn sm", onclick: () => promptMessage(t) }, "Message…"),
+        d.activeMessage
+          ? el("button", { class: "btn sm", onclick: () => command(t, "clear_message", {}) }, "Clear message")
+          : null,
         el("button", { class: "btn sm ghost", onclick: () => command(t, "list_now", {}) }, "Refresh")
       )
     );
@@ -1160,6 +1278,8 @@
         el("span", { class: "seen" }, d.online ? "online" : agoLabel(d.last_seen))
       )
     );
+
+    if (d.activeMessage) card.append(messageStatus(d.activeMessage));
 
     const left = (exp) => (exp > 0 ? ` (${Math.max(0, Math.round(exp - Date.now() / 1000))}s)` : "");
     if ((d.blocked && d.blocked.length) || (d.blockedSites && d.blockedSites.length)) {
@@ -1197,6 +1317,9 @@
         el("button", { class: "btn sm", onclick: () => command(t, "pause", { text: "Paused by your instructor — eyes up front." }) }, "⏸ Pause"),
         el("button", { class: "btn sm", onclick: () => command(t, "resume", {}) }, "▶ Resume"),
         el("button", { class: "btn sm", onclick: () => promptMessage(t) }, "Message…"),
+        d.activeMessage
+          ? el("button", { class: "btn sm", onclick: () => command(t, "clear_message", {}) }, "Clear message")
+          : null,
         el("button", { class: "btn sm ghost", onclick: () => command(t, "list_now", {}) }, "Refresh")
       )
     );
@@ -1208,8 +1331,7 @@
     if (n && n.trim()) command(t, "kill_process", { pattern: n.trim() });
   }
   function promptMessage(t) {
-    const txt = prompt("Message to show on the student screen:");
-    if (txt && txt.trim()) command(t, "message", { text: txt.trim() });
+    openMessageComposer((action, params) => command(t, action, params), "this computer");
   }
 
   // -------------------------------------------------------------------- admin
@@ -1243,9 +1365,12 @@
     { id: "block_all", label: "Block all games + sites", build: () => [{ action: "block_app", params: { patterns: allApps() } }, { action: "block_site", params: { domains: allSites() } }] },
     { id: "close_browsers", label: "Close all browsers", build: () => [{ action: "close_browsers" }] },
     { id: "unblock", label: "Unblock everything", build: () => [{ action: "unblock_all" }] },
-    { id: "message", label: "Show a message", build: (text) => [{ action: "message", params: { text: text || "" } }] },
+    { id: "message_info", label: "Show informational message", build: (text, timeout) => [{ action: "message", params: { kind: "info", text: text || "", timeout_sec: timeout } }] },
+    { id: "message_warning", label: "Show student warning", build: (text, timeout) => [{ action: "message", params: { kind: "warning", text: text || "", timeout_sec: timeout } }] },
+    { id: "message_transition", label: "Show transition-time message", build: (text, timeout) => [{ action: "message", params: { kind: "transition", text: text || "", timeout_sec: timeout } }] },
+    { id: "clear_message", label: "Clear enforced message", build: () => [{ action: "clear_message" }] },
   ];
-  const ACTION_LABEL = { pause: "Pause", resume: "Resume", block_app: "Block apps", block_site: "Block sites", unblock_all: "Unblock", close_browsers: "Close browsers", message: "Message", kill_process: "Close app" };
+  const ACTION_LABEL = { pause: "Pause", resume: "Resume", block_app: "Block apps", block_site: "Block sites", unblock_all: "Unblock", close_browsers: "Close browsers", message: "Message", clear_message: "Clear message", kill_process: "Close app" };
 
   function targetFromVal(v) {
     return v === "all" ? { scope: "all" } : { scope: "class", classId: v };
@@ -1314,12 +1439,15 @@
     });
     const targetSel = el("select", {}, ...classTargetOptions("all"));
     const typeSel = el("select", {}, ...EVENT_TYPES.map((t) => el("option", { value: t.id }, t.label)));
-    const msgI = el("input", { placeholder: "Message text (only for “Show a message”)" });
+    const msgI = el("input", { placeholder: "Message text (for message events)" });
+    const msgTimeoutI = el("input", { type: "number", min: "0", max: "86400", value: "0", placeholder: "0" });
     const addBtn = el("button", { class: "btn primary sm", onclick: () => {
       const et = EVENT_TYPES.find((t) => t.id === typeSel.value) || EVENT_TYPES[0];
-      org({ op: "addSchedule", name: nameI.value.trim() || "Event", time: timeI.value || "12:00", days: dayState.slice(), target: targetFromVal(targetSel.value), commands: et.build(msgI.value.trim()), enabled: true });
+      const timeout = Math.max(0, Math.min(86400, parseInt(msgTimeoutI.value, 10) || 0));
+      org({ op: "addSchedule", name: nameI.value.trim() || "Event", time: timeI.value || "12:00", days: dayState.slice(), target: targetFromVal(targetSel.value), commands: et.build(msgI.value.trim(), timeout), enabled: true });
       nameI.value = "";
       msgI.value = "";
+      msgTimeoutI.value = "0";
       dayState.length = 0;
       [...dayBtns.children].forEach((c) => c.classList.remove("active"));
       toast("Scheduled event added.");
@@ -1332,7 +1460,7 @@
         el("div", { class: "sched-row" }, fieldInline("Name", nameI), fieldInline("Time", timeI)),
         el("div", { class: "sched-row" }, fieldInline("Days (none = every day)", dayBtns)),
         el("div", { class: "sched-row" }, fieldInline("Computers", targetSel), fieldInline("Event", typeSel)),
-        el("div", { class: "sched-row" }, fieldInline("Message", msgI), addBtn)
+        el("div", { class: "sched-row" }, fieldInline("Message", msgI), fieldInline("Timeout seconds", msgTimeoutI), addBtn)
       )
     );
 
@@ -1633,7 +1761,7 @@
           locationId: loc.id, buildingId: bId, classId: cId,
           online: Math.random() > 0.15, last_seen: Date.now() / 1000 - Math.floor(Math.random() * 120),
           windows: shuffle(wins).slice(0, 3 + Math.floor(Math.random() * 3)),
-          processes: shuffle(procs).slice(0, 5), blocked: [], blockedSites: [], sitesAvailable: true,
+          processes: shuffle(procs).slice(0, 5), blocked: [], blockedSites: [], sitesAvailable: true, activeMessage: null,
         };
         n++;
       }
@@ -1686,6 +1814,23 @@
       if (obj.action === "block_app") for (const pat of [].concat(p.patterns || [], p.pattern || [])) d.blocked.push({ pattern: String(pat).toLowerCase(), expires_at: exp });
       else if (obj.action === "block_site") for (const dom of [].concat(p.domains || [], p.domain || [])) d.blockedSites.push({ domain: String(dom).toLowerCase(), expires_at: exp });
       else if (obj.action === "unblock_all") { d.blocked = []; d.blockedSites = []; }
+      else if (obj.action === "message" && (p.kind === "warning" || p.kind === "transition")) {
+        const messageId = `demo-message-${Date.now()}`;
+        d.activeMessage = {
+          id: messageId,
+          kind: p.kind,
+          text: String(p.text || ""),
+          expires_at: p.timeout_sec ? Date.now() / 1000 + Number(p.timeout_sec) : 0,
+        };
+        if (p.timeout_sec) {
+          setTimeout(() => {
+            if (d.activeMessage && d.activeMessage.id === messageId) {
+              d.activeMessage = null;
+              if (nav.view === "monitor") render();
+            }
+          }, Number(p.timeout_sec) * 1000);
+        }
+      } else if (obj.action === "clear_message") d.activeMessage = null;
     }
     toast(`Demo: ${obj.action.replace(/_/g, " ")} → ${affected.length} computer(s)`);
     render();

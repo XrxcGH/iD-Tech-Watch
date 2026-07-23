@@ -180,40 +180,183 @@ async function killMatching(pattern) {
   return killed;
 }
 
-// A pop-up message. Optional timeoutSec auto-closes it (a centered, top-most
-// window with an OK button + optional auto-dismiss timer).
-function showMessage(text, timeoutSec) {
-  text = text || "";
-  timeoutSec = Number(timeoutSec) || 0;
-  log(`instructor message: ${text}${timeoutSec ? ` (auto-close ${timeoutSec}s)` : ""}`);
-  try {
-    if (IS_WIN) {
-      const safe = text.replace(/'/g, "''");
-      const timeoutMs = timeoutSec > 0 ? Math.round(timeoutSec * 1000) : 0;
-      const ps =
-        "Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase; " +
-        "$w=New-Object System.Windows.Window; $w.Title='iD Tech Instructor'; $w.SizeToContent='WidthAndHeight'; " +
-        "$w.WindowStartupLocation='CenterScreen'; $w.Topmost=$true; $w.ResizeMode='NoResize'; " +
-        "$sp=New-Object System.Windows.Controls.StackPanel; $sp.Margin='24'; " +
-        "$t=New-Object System.Windows.Controls.TextBlock; $t.Text='" + safe + "'; $t.FontSize=20; " +
-        "$t.TextWrapping='Wrap'; $t.MaxWidth=520; $t.Margin='0,0,0,16'; " +
-        "$b=New-Object System.Windows.Controls.Button; $b.Content='OK'; $b.Width=90; $b.HorizontalAlignment='Right'; " +
-        "$b.Add_Click({ $w.Close() }); $sp.Children.Add($t)|Out-Null; $sp.Children.Add($b)|Out-Null; $w.Content=$sp; " +
-        (timeoutMs > 0
-          ? "$tm=New-Object System.Windows.Threading.DispatcherTimer; $tm.Interval=[TimeSpan]::FromMilliseconds(" +
-            timeoutMs +
-            "); $tm.Add_Tick({ $tm.Stop(); $w.Close() }); $w.Add_Loaded({ $tm.Start() }); "
-          : "") +
-        "[void]$w.ShowDialog();";
-      execFile("powershell", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps], { windowsHide: true }, () => {});
-    } else if (IS_MAC) {
-      const safe = text.replace(/"/g, '\\"');
-      const giveUp = timeoutSec > 0 ? ` giving up after ${Math.round(timeoutSec)}` : "";
-      execFile("osascript", ["-e", `display dialog "${safe}" with title "iD Tech Instructor" buttons {"OK"}${giveUp}`], () => {});
-    }
-  } catch (_) {
-    /* best effort */
+// ------------------------------------------------------- classroom messages
+// Windows uses documented WPF/SystemParameters APIs. The overlay spans the
+// virtual desktop, remains Topmost, and updates its bounds when monitors change.
+// Message content is base64-encoded JSON data, never interpolated as script.
+function messageKind(kind) {
+  return kind === "warning" || kind === "transition" ? kind : "info";
+}
+
+function stopMessageWindow() {
+  messageGeneration++;
+  if (messageRespawnTimer) clearTimeout(messageRespawnTimer);
+  messageRespawnTimer = null;
+  const child = messageChild;
+  messageChild = null;
+  if (child) {
+    try {
+      child.kill();
+    } catch (_) {}
   }
+}
+
+function messageWindowScript(payload) {
+  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
+  return (
+    "Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase; " +
+    `$json=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')); ` +
+    "$data=$json|ConvertFrom-Json; " +
+    "$w=New-Object System.Windows.Window; $w.Title='iD Tech Classroom Message'; " +
+    "$w.WindowStyle='None'; $w.ResizeMode='NoResize'; $w.SizeToContent='Manual'; " +
+    "$w.Topmost=$true; $w.ShowInTaskbar=$true; $w.Background='#000000'; " +
+    "$root=New-Object System.Windows.Controls.Grid; $root.Margin='48'; " +
+    "$panel=New-Object System.Windows.Controls.Border; $panel.Background='#151515'; " +
+    "$panel.BorderBrush='#94D60A'; $panel.BorderThickness='4'; $panel.CornerRadius='18'; " +
+    "$panel.Padding='48'; $panel.MaxWidth=1100; $panel.HorizontalAlignment='Center'; $panel.VerticalAlignment='Center'; " +
+    "$stack=New-Object System.Windows.Controls.StackPanel; " +
+    "$brand=New-Object System.Windows.Controls.TextBlock; $brand.Text='iD TECH CLASSROOM MESSAGE'; " +
+    "$brand.Foreground='#94D60A'; $brand.FontSize=22; $brand.FontWeight='Bold'; $brand.TextAlignment='Center'; " +
+    "$kind=New-Object System.Windows.Controls.TextBlock; " +
+    "$kind.Text=if($data.kind -eq 'warning'){'STUDENT WARNING'}elseif($data.kind -eq 'transition'){'TRANSITION TIME'}else{'INFORMATION'}; " +
+    "$kind.Foreground='#FFFFFF'; $kind.FontSize=30; $kind.FontWeight='Bold'; $kind.TextAlignment='Center'; $kind.Margin='0,18,0,24'; " +
+    "$text=New-Object System.Windows.Controls.TextBlock; $text.Text=[string]$data.text; " +
+    "$text.Foreground='#FFFFFF'; $text.FontSize=[Math]::Max(30,[Math]::Min(54,[System.Windows.SystemParameters]::PrimaryScreenWidth/28)); " +
+    "$text.FontWeight='SemiBold'; $text.TextWrapping='Wrap'; $text.TextAlignment='Center'; $text.MaxWidth=980; " +
+    "$stack.Children.Add($brand)|Out-Null; $stack.Children.Add($kind)|Out-Null; $stack.Children.Add($text)|Out-Null; " +
+    "if($data.enforced){" +
+    "$note=New-Object System.Windows.Controls.TextBlock; $note.Text='Your instructor will clear this classroom message.'; " +
+    "$note.Foreground='#BFC5C9'; $note.FontSize=18; $note.TextAlignment='Center'; $note.Margin='0,30,0,0'; " +
+    "$stack.Children.Add($note)|Out-Null" +
+    "}else{" +
+    "$button=New-Object System.Windows.Controls.Button; $button.Content='Dismiss'; $button.Width=150; $button.Height=46; " +
+    "$button.FontSize=18; $button.FontWeight='Bold'; $button.Background='#94D60A'; $button.Foreground='#000000'; " +
+    "$button.HorizontalAlignment='Center'; $button.Margin='0,30,0,0'; $button.Add_Click({$w.Close()}); " +
+    "$stack.Children.Add($button)|Out-Null" +
+    "}; " +
+    "$panel.Child=$stack; $root.Children.Add($panel)|Out-Null; $w.Content=$root; " +
+    "$fit={ $w.WindowState='Normal'; $w.Left=[System.Windows.SystemParameters]::VirtualScreenLeft; " +
+    "$w.Top=[System.Windows.SystemParameters]::VirtualScreenTop; $w.Width=[System.Windows.SystemParameters]::VirtualScreenWidth; " +
+    "$w.Height=[System.Windows.SystemParameters]::VirtualScreenHeight; $w.Topmost=$true }; " +
+    "$monitorTimer=New-Object System.Windows.Threading.DispatcherTimer; $monitorTimer.Interval=[TimeSpan]::FromSeconds(1); " +
+    "$monitorTimer.Add_Tick($fit); " +
+    "if((-not $data.enforced) -and ([double]$data.timeout_sec -gt 0)){" +
+    "$closeTimer=New-Object System.Windows.Threading.DispatcherTimer; " +
+    "$closeTimer.Interval=[TimeSpan]::FromSeconds([double]$data.timeout_sec); " +
+    "$closeTimer.Add_Tick({$closeTimer.Stop();$w.Close()})" +
+    "}; " +
+    "$w.Add_Loaded({& $fit;$monitorTimer.Start();if($closeTimer){$closeTimer.Start()};$w.Activate()}); " +
+    "$w.Add_Closed({$monitorTimer.Stop();if($closeTimer){$closeTimer.Stop()}}); [void]$w.ShowDialog();"
+  );
+}
+
+function spawnMessageWindow(message, enforced) {
+  if (!message || !message.text || messageChild) return;
+  const kind = messageKind(message.kind);
+  const text = String(message.text).slice(0, 4000);
+  const generation = ++messageGeneration;
+
+  if (!IS_WIN) {
+    if (kind !== "info" || !IS_MAC) {
+      log("WARNING: enforced full-screen classroom messages currently require Windows.");
+      return;
+    }
+    const script =
+      'on run argv\n display dialog (item 1 of argv) with title "iD Tech Classroom Message" buttons {"Dismiss"}\nend run';
+    messageChild = spawn("osascript", ["-e", script, "--", text], { stdio: "ignore" });
+  } else {
+    const ps = messageWindowScript({
+      kind,
+      text,
+      enforced: !!enforced,
+      timeout_sec: Number(message.timeout_sec) || 0,
+    });
+    messageChild = spawn("powershell", ["-NoProfile", "-STA", "-WindowStyle", "Hidden", "-Command", ps], {
+      windowsHide: true,
+      stdio: "ignore",
+    });
+  }
+
+  const child = messageChild;
+  child.on("exit", () => {
+    if (generation !== messageGeneration) return;
+    messageChild = null;
+    if (enforced && activeMessage && activeMessage.id === message.id) {
+      messageRespawnTimer = setTimeout(() => {
+        messageRespawnTimer = null;
+        spawnMessageWindow(activeMessage, true);
+      }, 400);
+    }
+  });
+}
+
+function scheduleMessageExpiry() {
+  if (messageExpiryTimer) clearTimeout(messageExpiryTimer);
+  messageExpiryTimer = null;
+  if (!activeMessage || !activeMessage.expires_at) return;
+  const delay = Math.max(0, activeMessage.expires_at * 1000 - Date.now());
+  const id = activeMessage.id;
+  messageExpiryTimer = setTimeout(() => {
+    messageExpiryTimer = null;
+    if (activeMessage && activeMessage.id === id) {
+      activeMessage = null;
+      stopMessageWindow();
+      log(`enforced classroom message ${id} expired`);
+    }
+  }, Math.min(delay, 2147483647));
+}
+
+function applyMessageState(message) {
+  const valid =
+    message &&
+    message.id &&
+    (message.kind === "warning" || message.kind === "transition") &&
+    String(message.text || "").trim();
+  if (!valid || (message.expires_at && message.expires_at <= Date.now() / 1000)) {
+    const previous = activeMessage && activeMessage.id;
+    activeMessage = null;
+    if (messageExpiryTimer) clearTimeout(messageExpiryTimer);
+    messageExpiryTimer = null;
+    stopMessageWindow();
+    if (previous) log(`enforced classroom message ${previous} cleared`);
+    return;
+  }
+
+  const next = {
+    id: String(message.id),
+    kind: messageKind(message.kind),
+    text: String(message.text).slice(0, 4000),
+    expires_at: Number(message.expires_at) || 0,
+  };
+  const unchanged =
+    activeMessage &&
+    activeMessage.id === next.id &&
+    activeMessage.kind === next.kind &&
+    activeMessage.text === next.text;
+  activeMessage = next;
+  scheduleMessageExpiry();
+  if (!unchanged || !messageChild) {
+    stopMessageWindow();
+    spawnMessageWindow(activeMessage, true);
+    log(`enforced ${activeMessage.kind} message ${activeMessage.id} active`);
+  }
+}
+
+function showInformationalMessage(params) {
+  const text = String((params && params.text) || "").trim().slice(0, 4000);
+  if (!text) return;
+  if (activeMessage) {
+    log("informational message skipped while an enforced classroom message is active");
+    return;
+  }
+  stopMessageWindow();
+  const message = {
+    kind: "info",
+    text,
+    timeout_sec: Math.max(0, Number(params.timeout_sec) || 0),
+  };
+  spawnMessageWindow(message, false);
+  log(`informational classroom message displayed${message.timeout_sec ? ` (${message.timeout_sec}s)` : ""}`);
 }
 
 // ------------------------------------------------------- website (hosts) block
@@ -386,7 +529,11 @@ async function handleCommand(ws, msg) {
   } else if (action === "resume") {
     resumeScreen();
   } else if (action === "message") {
-    showMessage(p.text || "", p.timeout_sec);
+    showInformationalMessage(p);
+  } else if (action === "message_state") {
+    applyMessageState(p.message || null);
+  } else if (action === "clear_message") {
+    applyMessageState(null);
   } else if (action === "list_now") {
     await sendStatus(ws);
   } else {
@@ -490,6 +637,10 @@ function resumeScreen() {
 // --------------------------------------------------------------- exit cleanup
 function killHelpers() {
   pauseActive = false; // don't let the overlay respawn during shutdown
+  activeMessage = null;
+  if (messageExpiryTimer) clearTimeout(messageExpiryTimer);
+  messageExpiryTimer = null;
+  stopMessageWindow();
   try {
     if (awakeChild) awakeChild.kill();
   } catch (_) {}
@@ -590,6 +741,9 @@ function main() {
           token: args.token || "",
         })
       );
+      // Ask the hub for authoritative enforced-message state on every
+      // connection so an overlay cleared while offline cannot return stale.
+      ws.send(JSON.stringify({ type: "message_state_request" }));
       sendStatus(ws).catch(() => {});
       statusTimer = setInterval(() => sendStatus(ws).catch(() => {}), args.interval * 1000);
     };
@@ -622,4 +776,5 @@ function main() {
   connect();
 }
 
-main();
+if (require.main === module) main();
+else module.exports = { messageKind, messageWindowScript };

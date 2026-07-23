@@ -40,12 +40,14 @@ h3 {
 }
 input,
 select,
+textarea,
 button {
   font-family: inherit;
   font-size: 14px;
 }
 input,
-select {
+select,
+textarea {
   padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -54,7 +56,8 @@ select {
   width: 100%;
 }
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   outline: none;
   border-color: var(--id-green);
   box-shadow: 0 0 0 3px rgba(148, 214, 10, 0.35);
@@ -637,6 +640,33 @@ select:focus {
   border-radius: 8px;
   padding: 5px 8px;
 }
+.message-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--id-green);
+  border-radius: 8px;
+  background: var(--id-green-soft);
+  font-size: 12px;
+}
+.message-status.warning {
+  border-left-color: var(--danger);
+  background: rgba(217, 45, 32, 0.08);
+}
+.message-status.transition {
+  border-left-color: #d98b00;
+  background: #fff7e6;
+}
+.message-status-label {
+  font-weight: 700;
+}
+.message-status-time {
+  color: var(--muted);
+  white-space: nowrap;
+}
 .block-select {
   width: auto;
   padding: 5px 8px;
@@ -933,6 +963,12 @@ details.apps .procs {
   font-weight: 700;
   color: var(--danger);
 }
+.seat-message {
+  position: absolute;
+  left: 6px;
+  top: 4px;
+  font-size: 13px;
+}
 
 /* ------------------------------------------------------- device control sheet */
 #overlay {
@@ -981,6 +1017,21 @@ details.apps .procs {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+.message-compose {
+  width: min(560px, 92vw);
+}
+.message-compose textarea {
+  min-height: 130px;
+  resize: vertical;
+}
+.message-help {
+  margin: -4px 0 2px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.message-compose-actions {
+  justify-content: flex-end;
 }
 @media (max-width: 640px) {
   .sheet {
