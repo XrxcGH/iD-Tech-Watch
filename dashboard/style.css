@@ -27,7 +27,7 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --id-green: #b8bb26;
+  --id-green: #94d60a;
   --id-green-dark: #98971a;
   --brand-ink: #d8db4b;
   --id-green-soft: rgba(184, 187, 38, 0.14);
@@ -431,12 +431,15 @@ textarea:focus {
 }
 .search-icon {
   position: absolute;
-  left: 11px;
-  top: 50%;
-  transform: translateY(-50%);
+  left: 8px;
+  top: 0;
+  bottom: 0;
+  display: grid;
+  width: 20px;
+  place-items: center;
   color: var(--muted);
   font-size: 18px;
-  line-height: 1;
+  line-height: 0;
   pointer-events: none;
 }
 .search-clear {
@@ -1296,7 +1299,7 @@ details.apps .procs {
 }
 .download-fab {
   position: fixed;
-  right: 18px;
+  left: 18px;
   bottom: 18px;
   z-index: 40;
   background: var(--id-green);
@@ -1324,9 +1327,7 @@ details.apps .procs {
 @media (max-width: 520px) {
   .download-fab {
     left: 12px;
-    right: 12px;
     bottom: 12px;
-    width: calc(100% - 24px);
   }
 }
 .code-field {
