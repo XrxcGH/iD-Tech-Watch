@@ -40,6 +40,7 @@ const AGENT_EXE_PATH =
   process.env.IDT_AGENT_EXE_PATH ||
   path.join(__dirname, "..", "dist", "iD-Tech-Watch.exe");
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const MAX_WS_PAYLOAD_BYTES = 1024 * 1024;
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 // ==========================================================================
@@ -47,6 +48,9 @@ const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 // ==========================================================================
 function genId(prefix) {
   return `${prefix}_${crypto.randomBytes(5).toString("hex")}`;
+}
+function genBuildingCode() {
+  return String(crypto.randomInt(0, 10_000)).padStart(4, "0");
 }
 
 let config = {
@@ -68,6 +72,9 @@ function loadConfig() {
     for (const location of config.locations) {
       location.buildings ||= [];
       for (const building of location.buildings) {
+        if (!/^\d{4}$/.test(String(building.code || ""))) {
+          building.code = genBuildingCode();
+        }
         building.classes ||= [];
         for (const klass of building.classes) {
           klass.blockedApplications ||= [];
@@ -167,6 +174,13 @@ function validateToken(token) {
 
 // ---- org lookups ---------------------------------------------------------
 const norm = (s) => String(s || "").trim().toLowerCase();
+function safeText(value, maxLength, fallback = "") {
+  const text = String(value || "")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, maxLength);
+  return text || fallback;
+}
 
 function findLocation(id) {
   return config.locations.find((l) => l.id === id) || null;
@@ -207,7 +221,13 @@ function resolveLocationBuilding(locationName, buildingName) {
     (b) => norm(b.name) === bn || (b.aliases || []).some((a) => norm(a) === bn)
   );
   if (!bld) {
-    bld = { id: genId("bld"), name: buildingName || "Unassigned", aliases: [bn], code: "8676", classes: [] };
+    bld = {
+      id: genId("bld"),
+      name: buildingName || "Unassigned",
+      aliases: [bn],
+      code: genBuildingCode(),
+      classes: [],
+    };
     loc.buildings.push(bld);
   } else if (!(bld.aliases || []).some((a) => norm(a) === bn)) {
     (bld.aliases ||= []).push(bn);
@@ -275,6 +295,11 @@ class WSConn {
       if (buf.length < offset + 8) return null;
       len = buf.readUInt32BE(offset) * 2 ** 32 + buf.readUInt32BE(offset + 4);
       offset += 8;
+    }
+    if (!masked || !Number.isSafeInteger(len) || len > MAX_WS_PAYLOAD_BYTES) {
+      this.buf = Buffer.alloc(0);
+      this.close();
+      return null;
     }
     let maskKey = null;
     if (masked) {
@@ -348,16 +373,18 @@ const CLOSE_RESULT_TIMEOUT_MS = Math.max(
 );
 
 function registerAgent(ws, info) {
-  const deviceId = String(info.device_id || `unknown-${Date.now()}`);
+  const deviceId = safeText(info.device_id, 200, `unknown-${Date.now()}`);
+  const locationName = safeText(info.location, 100, "Unassigned");
+  const buildingName = safeText(info.building, 100, "Unassigned");
   const { locationId, buildingId, building } = resolveLocationBuilding(
-    info.location,
-    info.building
+    locationName,
+    buildingName
   );
 
   // Optional class hint: if the laptop was started with --class and the admin
   // hasn't assigned it yet, auto-create that class and assign it (friendly for
   // first-time setup; admin assignment always takes precedence afterwards).
-  const hint = (info.klass || "").trim();
+  const hint = safeText(info.klass, 100);
   if (hint && !config.assignments[deviceId]) {
     let cls = building.classes.find((c) => norm(c.name) === norm(hint));
     if (!cls) {
@@ -368,10 +395,15 @@ function registerAgent(ws, info) {
   }
 
   const prev = devices.get(deviceId) || {};
+  const priorConnection = agentWs.get(deviceId);
+  if (priorConnection && priorConnection !== ws) {
+    wsDevice.delete(priorConnection);
+    priorConnection.close();
+  }
   devices.set(deviceId, {
     device_id: deviceId,
-    hostname: info.hostname || deviceId,
-    os: info.os || "unknown",
+    hostname: safeText(info.hostname, 200, deviceId),
+    os: safeText(info.os, 100, "unknown"),
     locationId,
     buildingId,
     online: true,
@@ -392,8 +424,25 @@ function updateDevice(ws, data) {
   const deviceId = wsDevice.get(ws);
   const rec = deviceId && devices.get(deviceId);
   if (!rec) return null;
-  for (const key of ["blocked", "blockedSites", "sitesAvailable"])
-    if (key in data) rec[key] = data[key];
+  if (Array.isArray(data.blocked)) {
+    rec.blocked = data.blocked.slice(0, 100).flatMap((entry) => {
+      const pattern = normalizeAppPattern(entry && entry.pattern);
+      const expires_at = Number(entry && entry.expires_at);
+      return pattern && Number.isFinite(expires_at) && expires_at >= 0
+        ? [{ pattern, expires_at }]
+        : [];
+    });
+  }
+  if (Array.isArray(data.blockedSites)) {
+    rec.blockedSites = data.blockedSites.slice(0, 100).flatMap((entry) => {
+      const domain = normalizeDomain(entry && entry.domain);
+      const expires_at = Number(entry && entry.expires_at);
+      return domain && Number.isFinite(expires_at) && expires_at >= 0
+        ? [{ domain, expires_at }]
+        : [];
+    });
+  }
+  if ("sitesAvailable" in data) rec.sitesAvailable = data.sitesAvailable === true;
   if (Array.isArray(data.applications)) {
     rec.applications = sanitizeApplicationInventory(data.applications);
     rec.inventoryReportedAt = Date.now() / 1000;
@@ -438,8 +487,8 @@ function orgView(viewer) {
     buildings: loc.buildings.map((b) => ({
       id: b.id,
       name: b.name,
-      code: isAdmin ? b.code || "8676" : undefined,
-      codeRequired: !!(b.code || "8676"),
+      code: isAdmin ? b.code : undefined,
+      codeRequired: true,
       classes: b.classes.map((c) => ({
         id: c.id,
         name: c.name,
@@ -757,6 +806,7 @@ function completeForegroundClose(requestId, status, detail) {
 }
 
 function requestForegroundClose(dashboard, target) {
+  target = normalizeTarget(target);
   if (dashboard.role !== "admin" && dashboard.role !== "instructor") {
     throw new CommandValidationError("Not authorized to close student windows.");
   }
@@ -830,6 +880,95 @@ function normalizeMessageParams(params) {
   return { kind, text, timeout_sec };
 }
 
+function commandParamsObject(params) {
+  if (params === undefined || params === null) return {};
+  if (typeof params !== "object" || Array.isArray(params)) {
+    throw new CommandValidationError("Command parameters must be an object.");
+  }
+  return params;
+}
+
+function normalizedStringList(params, singular, plural, validator, label) {
+  const values = [];
+  if (params[singular] !== undefined) values.push(params[singular]);
+  if (params[plural] !== undefined) {
+    if (!Array.isArray(params[plural])) {
+      throw new CommandValidationError(`${label} list must be an array.`);
+    }
+    values.push(...params[plural]);
+  }
+  if (!values.length || values.length > 50) {
+    throw new CommandValidationError(`Provide between 1 and 50 ${label.toLowerCase()} values.`);
+  }
+  const normalized = values.map((value) => validator(value));
+  if (normalized.some((value) => !value)) {
+    throw new CommandValidationError(`${label} contains an invalid value.`);
+  }
+  return [...new Set(normalized)];
+}
+
+function normalizeAppPattern(value) {
+  const pattern = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return /^[a-z0-9][a-z0-9 ._-]{0,79}$/.test(pattern) ? pattern : null;
+}
+
+function normalizeDomain(value) {
+  if (typeof value !== "string" || /[\u0000-\u0020\u007f]/.test(value)) return null;
+  const domain = value
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "")
+    .replace(/^www\./, "");
+  if (
+    domain.length > 253 ||
+    !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(
+      domain
+    )
+  ) {
+    return null;
+  }
+  return domain;
+}
+
+function normalizeForwardedParams(action, params) {
+  const source = commandParamsObject(params);
+  if (action === "kill_process") {
+    const pattern = normalizeAppPattern(source.pattern);
+    if (!pattern) throw new CommandValidationError("Application pattern is invalid.");
+    return { pattern };
+  }
+  if (action === "block_app" || action === "unblock_app") {
+    const patterns = normalizedStringList(
+      source,
+      "pattern",
+      "patterns",
+      normalizeAppPattern,
+      "Application pattern"
+    );
+    return source.pattern !== undefined && source.patterns === undefined
+      ? { pattern: patterns[0] }
+      : { patterns };
+  }
+  if (action === "block_site" || action === "unblock_site") {
+    const domains = normalizedStringList(
+      source,
+      "domain",
+      "domains",
+      normalizeDomain,
+      "Website domain"
+    );
+    return source.domain !== undefined && source.domains === undefined
+      ? { domain: domains[0] }
+      : { domains };
+  }
+  if (action === "pause") {
+    const text = String(source.text || "").trim().slice(0, 500);
+    return { text: text || "Paused by your instructor — eyes up front." };
+  }
+  return {};
+}
+
 function sendMessageState(deviceId) {
   const ws = agentWs.get(deviceId);
   if (!ws) return false;
@@ -842,12 +981,13 @@ function sendMessageState(deviceId) {
 }
 
 function sendCommand(target, action, params) {
+  target = normalizeTarget(target);
   if (!DASHBOARD_COMMANDS.has(action)) {
     throw new CommandValidationError("Unknown or reserved command.");
   }
 
   if (action === "message") {
-    const message = normalizeMessageParams(params);
+    const message = normalizeMessageParams(commandParamsObject(params));
     if (!message.text) return 0;
 
     if (message.kind === "warning" || message.kind === "transition") {
@@ -901,10 +1041,10 @@ function sendCommand(target, action, params) {
     return sent;
   }
 
-  let commandParams = params || {};
+  let commandParams = normalizeForwardedParams(action, params);
   if (action === "block_app" || action === "block_site") {
     const duration = optionalPositiveSeconds(
-      commandParams,
+      commandParamsObject(params),
       "duration_sec",
       MAX_BLOCK_DURATION_SEC,
       "Block duration"
@@ -948,7 +1088,14 @@ function applyOrgOp(op) {
     }
     case "addBuilding": {
       const loc = findLocation(op.locationId);
-      if (loc) loc.buildings.push({ id: genId("bld"), name: op.name || "New Building", aliases: [], code: "8676", classes: [] });
+      if (loc)
+        loc.buildings.push({
+          id: genId("bld"),
+          name: op.name || "New Building",
+          aliases: [],
+          code: genBuildingCode(),
+          classes: [],
+        });
       break;
     }
     case "renameBuilding": {
@@ -958,7 +1105,11 @@ function applyOrgOp(op) {
     }
     case "setBuildingCode": {
       const f = findBuilding(op.id);
-      if (f) f.building.code = String(op.code || "").replace(/\D/g, "").slice(0, 4);
+      const code = String(op.code || "");
+      if (!/^\d{4}$/.test(code)) {
+        throw new CommandValidationError("Building instructor code must be exactly 4 digits.");
+      }
+      if (f) f.building.code = code;
       break;
     }
     case "deleteBuilding": {
@@ -1027,10 +1178,13 @@ function applyOrgOp(op) {
       config.schedules = config.schedules.filter((x) => x.id !== op.id);
       break;
     case "setInstructorCode":
-      config.auth.instructorCode = (op.code || "").trim();
+      config.auth.instructorCode = safeText(op.code, 100);
       break;
     case "setAdminPassword":
-      if (op.newPassword) setAdminPassword(op.newPassword);
+      if (typeof op.newPassword !== "string" || !op.newPassword || op.newPassword.length > 256) {
+        throw new CommandValidationError("Director password must be between 1 and 256 characters.");
+      }
+      setAdminPassword(op.newPassword);
       break;
     default:
       return false;
@@ -1051,7 +1205,15 @@ function applyLayoutOp(op) {
     const dev = String(op.deviceId || "");
     const x = Number(op.x);
     const y = Number(op.y);
-    if (!key || !dev || Number.isNaN(x) || Number.isNaN(y)) return false;
+    const rec = devices.get(dev);
+    const belongs =
+      rec &&
+      (key.startsWith("un:")
+        ? key.slice(3) === rec.buildingId && !deviceClassId(dev, rec.buildingId)
+        : deviceClassId(dev, rec.buildingId) === key);
+    if (!key || !dev || !belongs || !Number.isFinite(x) || !Number.isFinite(y)) {
+      return false;
+    }
     (config.layouts[key] ||= {})[dev] = {
       x: Math.max(0, Math.min(1, x)),
       y: Math.max(0, Math.min(1, y)),
@@ -1126,6 +1288,8 @@ function handleAgent(ws) {
 
 function handleDashboard(ws) {
   ws.role = null;
+  ws.allowedBuildings = new Set();
+  ws.buildingAuthFailures = [];
   ws.onmessage = (raw) => {
     let msg;
     try {
@@ -1145,19 +1309,57 @@ function handleDashboard(ws) {
       ws.role = session.role;
       dashboards.add(ws);
       ws.sendJSON({ type: "auth_ok", role: ws.role });
-      ws.sendJSON(stateMessage());
+      ws.sendJSON(stateMessage(ws));
       return;
     }
 
-    if (msg.type === "command") {
+    if (msg.type === "building_auth") {
+      if (ws.role !== "instructor") {
+        ws.sendJSON({
+          type: "building_auth_result",
+          buildingId: String(msg.buildingId || ""),
+          ok: true,
+        });
+        return;
+      }
+      const found = findBuilding(String(msg.buildingId || ""));
+      const supplied = String(msg.code || "");
+      const expected = found ? String(found.building.code) : "";
+      const cutoff = Date.now() - 60_000;
+      ws.buildingAuthFailures = ws.buildingAuthFailures.filter((at) => at >= cutoff);
+      if (ws.buildingAuthFailures.length >= 10) {
+        ws.sendJSON({
+          type: "building_auth_result",
+          buildingId: String(msg.buildingId || ""),
+          ok: false,
+          detail: "Too many incorrect attempts. Wait one minute and try again.",
+        });
+        return;
+      }
+      const ok =
+        /^\d{4}$/.test(supplied) &&
+        supplied.length === expected.length &&
+        crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
+      if (ok) ws.allowedBuildings.add(found.building.id);
+      else ws.buildingAuthFailures.push(Date.now());
+      ws.sendJSON({
+        type: "building_auth_result",
+        buildingId: String(msg.buildingId || ""),
+        ok,
+        detail: ok ? "" : "Incorrect building instructor code.",
+      });
+      if (ok) ws.sendJSON(stateMessage(ws));
+    } else if (msg.type === "command") {
       try {
         if (msg.action === "sync_class_app_rules") {
           throw new CommandValidationError("That command is reserved for the server.");
         }
+        const target = normalizeTarget(msg.target);
+        requireTargetAccess(ws, target);
         const sent =
           msg.action === "close_foreground"
-            ? requestForegroundClose(ws, msg.target || {})
-            : sendCommand(msg.target || {}, msg.action, msg.params);
+            ? requestForegroundClose(ws, target)
+            : sendCommand(target, msg.action, msg.params);
         ws.sendJSON({ type: "ack", action: msg.action, sent });
       } catch (error) {
         if (!(error instanceof CommandValidationError)) throw error;
@@ -1168,6 +1370,10 @@ function handleDashboard(ws) {
         if (ws.role !== "admin" && ws.role !== "instructor") {
           throw new CommandValidationError("Not authorized to change class application rules.");
         }
+        requireTargetAccess(
+          ws,
+          normalizeTarget({ scope: "class", classId: String(msg.classId || "") })
+        );
         applyClassAppRule(msg);
         ws.sendJSON({ type: "ack", action: "class_app_rule", sent: 0 });
         broadcastState();
@@ -1180,13 +1386,28 @@ function handleDashboard(ws) {
         ws.sendJSON({ type: "error", detail: "admin required" });
         return;
       }
-      if (applyOrgOp(msg)) {
-        syncAllClassAppRules();
-        broadcastState();
+      try {
+        if (applyOrgOp(msg)) {
+          syncAllClassAppRules();
+          broadcastState();
+        }
+      } catch (error) {
+        if (!(error instanceof CommandValidationError)) throw error;
+        ws.sendJSON({ type: "error", detail: error.message });
       }
     } else if (msg.type === "layout") {
       // seating positions — any authenticated instructor/admin may adjust
-      if (applyLayoutOp(msg)) broadcastState();
+      try {
+        const layoutKey = String(msg.layoutKey || "");
+        const target = layoutKey.startsWith("un:")
+          ? normalizeTarget({ scope: "building", buildingId: layoutKey.slice(3) })
+          : normalizeTarget({ scope: "class", classId: layoutKey });
+        requireTargetAccess(ws, target);
+        if (applyLayoutOp(msg)) broadcastState();
+      } catch (error) {
+        if (!(error instanceof CommandValidationError)) throw error;
+        ws.sendJSON({ type: "error", detail: error.message });
+      }
     }
   };
   ws.onclose = () => {

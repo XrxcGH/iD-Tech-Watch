@@ -11,8 +11,14 @@ $outputFullPath = [IO.Path]::GetFullPath($OutputPath)
 $outputDirectory = Split-Path -Parent $outputFullPath
 New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
 
-$compiler = Get-ChildItem -LiteralPath "$env:WINDIR\Microsoft.NET\Framework64" `
-    -Filter csc.exe -Recurse -ErrorAction SilentlyContinue |
+$frameworkRoots = @(
+    (Join-Path $env:WINDIR "Microsoft.NET\Framework64"),
+    (Join-Path $env:WINDIR "Microsoft.NET\Framework")
+) | Where-Object { Test-Path -LiteralPath $_ }
+$compiler = $frameworkRoots |
+    ForEach-Object {
+        Get-ChildItem -LiteralPath $_ -Filter csc.exe -Recurse -ErrorAction SilentlyContinue
+    } |
     Sort-Object FullName -Descending |
     Select-Object -First 1
 if (-not $compiler) {
@@ -20,6 +26,7 @@ if (-not $compiler) {
 }
 
 $source = Join-Path $repoRoot "launcher\iD-Tech-Watch.cs"
+$manifest = Join-Path $repoRoot "launcher\app.manifest"
 $agent = Join-Path $repoRoot "agent\agent.js"
 $watchdog = Join-Path $repoRoot "scripts\agent-watchdog.ps1"
 $compilerArgs = @(
@@ -27,6 +34,7 @@ $compilerArgs = @(
     "/target:winexe",
     "/optimize+",
     "/out:$outputFullPath",
+    "/win32manifest:$manifest",
     "/reference:System.dll",
     "/reference:System.Drawing.dll",
     "/reference:System.Web.Extensions.dll",

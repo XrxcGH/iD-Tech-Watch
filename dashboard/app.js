@@ -65,6 +65,7 @@
   let auth = JSON.parse(localStorage.getItem("idt_auth") || "null"); // {token, role}
   let ws = null;
   let lastAdminSig = "";
+  const buildingAuthWaiters = new Map();
 
   const UNASSIGNED = "__unassigned__";
   const MAX_MESSAGE_TIMEOUT_SEC = 24 * 60 * 60;
@@ -155,6 +156,11 @@
         auth.role = msg.role;
         setAuth(auth);
         ui.connected = true;
+        if (auth.role === "instructor") {
+          ui.unlocked = {};
+          nav.buildingId = null;
+          nav.classId = null;
+        }
         if (nav.view === "login") nav.view = auth.role === "admin" ? "admin" : "monitor";
         render();
       } else if (msg.type === "auth_error") {
@@ -172,6 +178,12 @@
           applyDeepLink();
         }
         onState();
+      } else if (msg.type === "building_auth_result") {
+        const resolve = buildingAuthWaiters.get(msg.buildingId);
+        if (resolve) {
+          buildingAuthWaiters.delete(msg.buildingId);
+          resolve(msg);
+        }
       } else if (msg.type === "ack") {
         if (msg.action === "class_app_rule") toast("Class application rules updated.");
         else if (msg.action !== "close_foreground")
@@ -205,6 +217,10 @@
     };
     ws.onclose = () => {
       ui.connected = false;
+      for (const resolve of buildingAuthWaiters.values()) {
+        resolve({ ok: false, detail: "Connection lost. Try the building code again." });
+      }
+      buildingAuthWaiters.clear();
       updateConn();
       if (auth) setTimeout(connect, 2000);
     };
@@ -213,6 +229,29 @@
         ws.close();
       } catch (_) {}
     };
+  }
+
+  function authorizeBuilding(buildingId, code) {
+    return new Promise((resolve) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        resolve({ ok: false, detail: "The hub is reconnecting. Try again shortly." });
+        return;
+      }
+      const previous = buildingAuthWaiters.get(buildingId);
+      if (previous) previous({ ok: false, detail: "A newer code attempt replaced this one." });
+      const timer = setTimeout(() => {
+        if (buildingAuthWaiters.get(buildingId) === finish) {
+          buildingAuthWaiters.delete(buildingId);
+          resolve({ ok: false, detail: "The hub did not answer. Try again." });
+        }
+      }, 5000);
+      function finish(result) {
+        clearTimeout(timer);
+        resolve(result);
+      }
+      buildingAuthWaiters.set(buildingId, finish);
+      ws.send(JSON.stringify({ type: "building_auth", buildingId, code }));
+    });
   }
 
   function send(obj) {
@@ -863,7 +902,8 @@
     if (!loc || !loc.buildings.length) grid.append(emptyNote("No buildings in this location yet."));
     for (const b of loc ? loc.buildings : []) {
       const devs = devicesInBuilding(b.id);
-      const locked = !DEMO && b.code && !ui.unlocked[b.id];
+      const locked =
+        !DEMO && auth.role !== "admin" && b.codeRequired && !ui.unlocked[b.id];
       const node = tile(
         b.name,
         locked ? "🔒" : "🏢",
@@ -2251,9 +2291,12 @@
         if ((c.instructor && c.instructor.toLowerCase() === who.toLowerCase()) || c.name.toLowerCase() === who.toLowerCase()) {
           nav.view = "monitor";
           nav.locationId = loc.id;
-          nav.buildingId = b.id;
-          nav.classId = c.id;
-          ui.unlocked[b.id] = true; // a direct link implies they know their class
+          if (auth.role === "admin" || !b.codeRequired) {
+            nav.buildingId = b.id;
+            nav.classId = c.id;
+          } else {
+            setTimeout(() => openBuildingGate(loc, b, c.id), 0);
+          }
           return;
         }
     nav.view = "monitor";
@@ -2261,7 +2304,7 @@
   }
 
   // ---- per-building 4-digit instructor code gate ----
-  function openBuildingGate(loc, b) {
+  function openBuildingGate(loc, b, classId = null) {
     const o = ensureOverlay();
     o.innerHTML = "";
     const input = el("input", { class: "code-input", type: "text", inputmode: "numeric", maxlength: "4", placeholder: "••••", autocomplete: "off" });
@@ -2274,19 +2317,24 @@
       input,
       err
     );
-    const tryCode = () => {
+    const tryCode = async () => {
       const v = input.value.replace(/\D/g, "");
       input.value = v;
       if (v.length === 4) {
-        if (v === String(b.code || "8676")) {
+        input.disabled = true;
+        err.textContent = "Checking…";
+        const result = await authorizeBuilding(b.id, v);
+        if (result.ok) {
           ui.unlocked[b.id] = true;
           closeOverlay();
-          setDrill(loc.id, b.id, null);
+          setDrill(loc.id, b.id, classId);
         } else {
-          err.textContent = "Incorrect code.";
+          err.textContent = result.detail || "Incorrect code.";
           input.value = "";
+          input.disabled = false;
           input.classList.add("shake");
           setTimeout(() => input.classList.remove("shake"), 400);
+          input.focus();
         }
       }
     };

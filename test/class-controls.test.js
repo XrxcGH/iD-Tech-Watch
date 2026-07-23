@@ -206,6 +206,62 @@ test("focused-window, inventory, and class rule protocols stay authorized and ex
       initialState.org[0].buildings[0].classes[1].blockedApplications[0].source,
       "manual"
     );
+    assert.equal(initialState.org[0].buildings[0].code, undefined);
+    assert.deepEqual(initialState.devices, {});
+
+    dashboard.ws.send(
+      JSON.stringify({
+        type: "command",
+        action: "list_now",
+        target: { scope: "device", deviceId: "class-controls-device" },
+        params: {},
+      })
+    );
+    const lockedCommand = await dashboard.inbox.next(
+      (message) => message.type === "error"
+    );
+    assert.match(lockedCommand.detail, /building instructor code/);
+
+    dashboard.ws.send(
+      JSON.stringify({
+        type: "building_auth",
+        buildingId: "building-test",
+        code: "0000",
+      })
+    );
+    const incorrectCode = await dashboard.inbox.next(
+      (message) => message.type === "building_auth_result"
+    );
+    assert.equal(incorrectCode.ok, false);
+    dashboard.ws.send(
+      JSON.stringify({
+        type: "building_auth",
+        buildingId: "building-test",
+        code: "8676",
+      })
+    );
+    const correctCode = await dashboard.inbox.next(
+      (message) => message.type === "building_auth_result"
+    );
+    assert.equal(correctCode.ok, true);
+    const unlockedState = await dashboard.inbox.next(
+      (message) => message.type === "state"
+    );
+    assert.ok(unlockedState.devices["class-controls-device"]);
+
+    dashboard.ws.send(
+      JSON.stringify({
+        type: "command",
+        action: "block_site",
+        target: { scope: "device", deviceId: "class-controls-device" },
+        params: { domain: "example.com\r\n127.0.0.1 injected.test" },
+      })
+    );
+    const unsafeDomain = await dashboard.inbox.next(
+      (message) => message.type === "error"
+    );
+    assert.match(unsafeDomain.detail, /Website domain/);
+
     dashboard.ws.send(
       JSON.stringify({
         type: "command",

@@ -2,10 +2,10 @@
   "name": "id-tech-classroom-monitor",
   "version": "0.1.0",
   "private": true,
-  "description": "Classroom-management hub + agent for iD Tech Camps (view windows, close apps, block games like Roblox) across buildings and classes.",
+  "description": "Classroom-management hub and privacy-conscious Windows agent for iD Tech Camps.",
   "type": "commonjs",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "scripts": {
     "start": "node server/server.js",

@@ -3,7 +3,9 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Reflection;
+using System.Security.Principal;
 using System.Text;
+using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
@@ -28,6 +30,13 @@ namespace IDTechWatch
         [STAThread]
         private static void Main(string[] args)
         {
+            if (Environment.GetEnvironmentVariable("IDT_WATCH_SILENT") != "1" &&
+                !IsAdministrator())
+            {
+                RelaunchElevated(args);
+                return;
+            }
+
             string runtime = Environment.GetEnvironmentVariable("IDT_WATCH_RUNTIME");
             if (String.IsNullOrWhiteSpace(runtime))
             {
@@ -50,7 +59,11 @@ namespace IDTechWatch
                 ExtractResource(AgentResource, Path.Combine(runtime, "agent.js"));
                 ExtractResource(WatchdogResource, Path.Combine(runtime, "agent-watchdog.ps1"));
 
-                WatchConfig config = ConfigFromArgs(args);
+                bool reconfigure = HasFlag(args, "--configure");
+                WatchConfig commandLineConfig = ConfigFromArgs(args);
+                WatchConfig config = reconfigure ? PromptForConfig() : commandLineConfig;
+                if (reconfigure && config == null)
+                    return;
                 string configPath = Path.Combine(runtime, "config.json");
                 if (config == null && File.Exists(configPath))
                     config = ReadConfig(configPath);
@@ -66,12 +79,23 @@ namespace IDTechWatch
                     new UTF8Encoding(false)
                 );
                 string stopFlag = Path.Combine(runtime, "shutdown.flag");
+
+                int existingPid;
+                bool alreadyRunning =
+                    TryReadPid(Path.Combine(runtime, "watchdog.pid"), out existingPid) &&
+                    ProcessIsRunning(existingPid, "powershell");
+                if (alreadyRunning && (reconfigure || commandLineConfig != null))
+                {
+                    File.WriteAllText(stopFlag, DateTime.UtcNow.ToString("o"));
+                    StopPidFile(Path.Combine(runtime, "agent.pid"), "node");
+                    StopPidFile(Path.Combine(runtime, "watchdog.pid"), "powershell");
+                    Thread.Sleep(300);
+                    alreadyRunning = false;
+                }
                 if (File.Exists(stopFlag))
                     File.Delete(stopFlag);
 
-                int existingPid;
-                if (TryReadPid(Path.Combine(runtime, "watchdog.pid"), out existingPid) &&
-                    ProcessIsRunning(existingPid, "powershell"))
+                if (alreadyRunning)
                 {
                     Notify(
                         "iD-Tech-Watch is already monitoring this computer.",
@@ -116,6 +140,36 @@ namespace IDTechWatch
                 token = ValueAfter(args, "--token") ?? "",
                 keepAwake = HasFlag(args, "--keep-awake")
             };
+        }
+
+        private static bool IsAdministrator()
+        {
+            WindowsIdentity identity = WindowsIdentity.GetCurrent();
+            WindowsPrincipal principal = new WindowsPrincipal(identity);
+            return principal.IsInRole(WindowsBuiltInRole.Administrator);
+        }
+
+        private static void RelaunchElevated(string[] args)
+        {
+            try
+            {
+                ProcessStartInfo start = new ProcessStartInfo();
+                start.FileName = Assembly.GetExecutingAssembly().Location;
+                start.Arguments = String.Join(" ", Array.ConvertAll(args, Quote));
+                start.UseShellExecute = true;
+                start.Verb = "runas";
+                Process.Start(start);
+            }
+            catch (Exception error)
+            {
+                Notify(
+                    "Administrator approval is required so the client can enforce classroom controls.\n\n" +
+                    error.Message,
+                    "iD-Tech-Watch needs permission",
+                    MessageBoxIcon.Error
+                );
+                Environment.ExitCode = 1;
+            }
         }
 
         private static WatchConfig PromptForConfig()
