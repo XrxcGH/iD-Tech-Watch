@@ -4,7 +4,7 @@
  *
  * Copy this single file onto each class laptop (Node 18+; uses the built-in
  * global WebSocket client, stable in Node 22+). It connects to the classroom
- * hub, reports open windows + running apps, and carries out instructor commands:
+ * hub, reports a limited running-application inventory, and carries out instructor commands:
  * close/block apps (Roblox, Minecraft, Steam, …) and block websites (poki.com …).
  *
  * TRANSPARENCY / RESPONSIBLE USE
@@ -108,47 +108,60 @@ function run(cmd, args, timeoutMs = 6000) {
 
 // ---------------------------------------------------------------- inspection
 async function inspect() {
-  const processes = new Set();
-  const windows = new Set();
+  const applications = new Map();
+
+  function addApplication(processName, displayName) {
+    const executable = normalizeExecutableIdentifier(processName);
+    if (!executable) return;
+    const readable = String(displayName || processName || "")
+      .replace(/[\u0000-\u001f\u007f]/g, "")
+      .trim()
+      .slice(0, 100);
+    const current = applications.get(executable);
+    if (!current || current.display_name === current.process_name) {
+      applications.set(executable, {
+        process_name: executable,
+        display_name: readable || executable,
+        executable,
+      });
+    }
+  }
 
   if (IS_WIN) {
-    // One fast PowerShell call emitting "<ProcessName>\t<MainWindowTitle>" per
-    // process. (`tasklist /v` is reliable but painfully slow on some machines.)
+    // FileDescription supplies a readable application name when available.
+    // Window titles, command lines, file contents, and user input are never read.
     const out = await run("powershell", [
       "-NoProfile",
       "-NonInteractive",
       "-Command",
-      'Get-Process | ForEach-Object { $_.ProcessName + "`t" + $_.MainWindowTitle }',
+      "@(Get-Process | Where-Object {$_.MainWindowHandle -ne 0} | ForEach-Object {" +
+        "$description='';try{$description=$_.FileVersionInfo.FileDescription}catch{};" +
+        "[pscustomobject]@{process=$_.ProcessName;display=$description}" +
+        "})|ConvertTo-Json -Compress",
     ]);
-    for (const line of out.split(/\r?\n/)) {
-      if (!line.trim()) continue;
-      const tab = line.indexOf("\t");
-      const name = (tab === -1 ? line : line.slice(0, tab)).trim();
-      const title = (tab === -1 ? "" : line.slice(tab + 1)).trim();
-      if (name) processes.add(name);
-      if (title) windows.add(title);
-    }
-  } else {
-    const psOut = await run("ps", ["-axco", "comm"]);
-    for (const line of psOut.split(/\r?\n/)) {
-      const name = line.trim();
-      if (name && name !== "COMM") processes.add(name);
-    }
-    if (IS_MAC) {
-      const script =
-        'tell application "System Events" to get the title of ' +
-        "every window of (every process whose visible is true)";
-      const w = await run("osascript", ["-e", script]);
-      for (const chunk of w.split(",")) {
-        const t = chunk.trim();
-        if (t) windows.add(t);
+    try {
+      const parsed = JSON.parse(out || "[]");
+      for (const item of Array.isArray(parsed) ? parsed : [parsed]) {
+        addApplication(item && item.process, item && item.display);
       }
+    } catch (_) {}
+  } else {
+    const psOut = IS_MAC
+      ? await run("osascript", [
+          "-e",
+          'tell application "System Events" to get the name of every process whose background only is false',
+        ])
+      : await run("ps", ["-axco", "comm"]);
+    for (const line of psOut.split(IS_MAC ? /,\s*/ : /\r?\n/)) {
+      const name = path.basename(line.trim());
+      if (name && name !== "COMM") addApplication(name, name);
     }
   }
 
   return {
-    processes: [...processes].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())).slice(0, MAX_PROCESSES),
-    windows: [...windows].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())),
+    applications: [...applications.values()]
+      .sort((a, b) => a.display_name.toLowerCase().localeCompare(b.display_name.toLowerCase()))
+      .slice(0, MAX_PROCESSES),
   };
 }
 
@@ -184,7 +197,7 @@ async function killMatching(pattern) {
 function normalizeExecutableIdentifier(value) {
   let executable = String(value || "").trim().toLowerCase();
   if (executable.endsWith(".exe")) executable = executable.slice(0, -4);
-  return /^[a-z0-9][a-z0-9._-]{0,79}$/.test(executable) ? executable : null;
+  return /^[a-z0-9][a-z0-9._ -]{0,79}$/.test(executable) ? executable : null;
 }
 
 async function killExact(executable) {
@@ -568,7 +581,7 @@ async function enforce() {
 
 // ------------------------------------------------------------------- status
 async function sendStatus(ws) {
-  const { processes, windows } = await inspect();
+  const { applications } = await inspect();
   const blocked = [...activeAppBlocks()].map(([pattern, exp]) => ({
     pattern,
     expires_at: exp ? exp / 1000 : 0,
@@ -584,8 +597,7 @@ async function sendStatus(ws) {
   ws.send(
     JSON.stringify({
       type: "status",
-      windows,
-      processes,
+      applications,
       blocked,
       blockedSites,
       classBlockedApplications,

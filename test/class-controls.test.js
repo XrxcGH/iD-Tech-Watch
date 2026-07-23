@@ -82,9 +82,10 @@ async function closeSocket(ws) {
   });
 }
 
-test("focused-window results and class application rules use authorized exact protocols", { timeout: 20000 }, async () => {
+test("focused-window, inventory, and class rule protocols stay authorized and exact", { timeout: 20000 }, async () => {
   assert.equal(normalizeExecutableIdentifier("Steam.exe"), "steam");
   assert.equal(normalizeExecutableIdentifier("steam-helper"), "steam-helper");
+  assert.equal(normalizeExecutableIdentifier("Google Chrome"), "google chrome");
   assert.equal(normalizeExecutableIdentifier("steam*"), null);
 
   const parsed = spawnSync(
@@ -124,6 +125,19 @@ test("focused-window results and class application rules use authorized exact pr
                   name: "Test Class",
                   instructor: "Instructor",
                   room: "101",
+                },
+                {
+                  id: "class-legacy",
+                  name: "Legacy Class",
+                  instructor: "Instructor",
+                  room: "102",
+                  blockedApplications: [
+                    {
+                      id: "legacy-rule",
+                      displayName: "Legacy Tool",
+                      executable: "legacytool",
+                    },
+                  ],
                 },
               ],
             },
@@ -188,6 +202,47 @@ test("focused-window results and class application rules use authorized exact pr
       initialState.org[0].buildings[0].classes[0].blockedApplications,
       []
     );
+    assert.equal(
+      initialState.org[0].buildings[0].classes[1].blockedApplications[0].source,
+      "manual"
+    );
+    agent.ws.send(
+      JSON.stringify({
+        type: "status",
+        applications: [
+          {
+            process_name: "steam",
+            display_name: "Steam",
+            executable: "Steam.exe",
+          },
+          {
+            process_name: "steam",
+            display_name: "Duplicate Steam",
+            executable: "steam",
+          },
+          {
+            process_name: "bad",
+            display_name: "<script>unsafe\u0000</script>",
+            executable: "bad*",
+          },
+        ],
+        blocked: [],
+        blockedSites: [],
+        sitesAvailable: true,
+      })
+    );
+    const inventoryState = await dashboard.inbox.next(
+      (message) =>
+        message.type === "state" &&
+        message.devices["class-controls-device"]?.applications?.length === 1
+    );
+    const inventoryDevice = inventoryState.devices["class-controls-device"];
+    assert.deepEqual(inventoryDevice.applications, [
+      { processName: "steam", displayName: "Steam", executable: "steam" },
+    ]);
+    assert.ok(inventoryDevice.inventory_reported_at > 0);
+    assert.equal(Object.hasOwn(inventoryDevice, "windows"), false);
+    assert.equal(Object.hasOwn(inventoryDevice, "processes"), false);
 
     dashboard.ws.send(
       JSON.stringify({
@@ -248,8 +303,9 @@ test("focused-window results and class application rules use authorized exact pr
         type: "class_app_rule",
         op: "add",
         classId: "class-test",
-        displayName: "Steam",
+        displayName: "Client-supplied label is ignored",
         executable: "Steam.exe",
+        source: "detected",
       })
     );
     const ruleSync = await agent.inbox.next(
@@ -268,6 +324,10 @@ test("focused-window results and class application rules use authorized exact pr
       ruleState.org[0].buildings[0].classes[0].blockedApplications[0].executable,
       "steam"
     );
+    assert.equal(
+      ruleState.org[0].buildings[0].classes[0].blockedApplications[0].source,
+      "detected"
+    );
 
     for (const executable of ["steam", "steam*"]) {
       dashboard.ws.send(
@@ -283,11 +343,60 @@ test("focused-window results and class application rules use authorized exact pr
       assert.ok(rejected.detail);
     }
 
+    dashboard.ws.send(
+      JSON.stringify({
+        type: "class_app_rule",
+        op: "add",
+        classId: "class-test",
+        displayName: "Not detected",
+        executable: "customtool",
+        source: "detected",
+      })
+    );
+    const unverifiedDetected = await dashboard.inbox.next(
+      (message) => message.type === "error" && message.detail.includes("no longer present")
+    );
+    assert.match(unverifiedDetected.detail, /manual rule/);
+
+    dashboard.ws.send(
+      JSON.stringify({
+        type: "class_app_rule",
+        op: "add",
+        classId: "class-test",
+        displayName: "Custom Tool",
+        executable: "customtool",
+        source: "manual",
+      })
+    );
+    const manualSync = await agent.inbox.next(
+      (message) =>
+        message.action === "sync_class_app_rules" &&
+        message.params.rules.length === 2
+    );
+    const manualId = manualSync.params.rules.find(
+      (rule) => rule.executable === "customtool"
+    ).id;
+    const manualState = await dashboard.inbox.next(
+      (message) =>
+        message.type === "state" &&
+        message.org[0].buildings[0].classes[0].blockedApplications.length === 2
+    );
+    assert.equal(
+      manualState.org[0].buildings[0].classes[0].blockedApplications.find(
+        (rule) => rule.id === manualId
+      ).source,
+      "manual"
+    );
+
     await new Promise((resolve) => setTimeout(resolve, 200));
     const persisted = JSON.parse(fs.readFileSync(configPath, "utf8"));
     assert.equal(
       persisted.locations[0].buildings[0].classes[0].blockedApplications[0].executable,
       "steam"
+    );
+    assert.equal(
+      persisted.locations[0].buildings[0].classes[0].blockedApplications[1].source,
+      "manual"
     );
 
     await closeSocket(agent.ws);
@@ -307,6 +416,7 @@ test("focused-window results and class application rules use authorized exact pr
       (message) => message.action === "sync_class_app_rules"
     );
     assert.equal(restoredRules.params.rules[0].executable, "steam");
+    assert.equal(restoredRules.params.rules.length, 2);
 
     dashboard.ws.send(
       JSON.stringify({
@@ -319,7 +429,20 @@ test("focused-window results and class application rules use authorized exact pr
     const removedRules = await reconnected.inbox.next(
       (message) => message.action === "sync_class_app_rules"
     );
-    assert.deepEqual(removedRules.params.rules, []);
+    assert.equal(removedRules.params.rules.length, 1);
+    dashboard.ws.send(
+      JSON.stringify({
+        type: "class_app_rule",
+        op: "remove",
+        classId: "class-test",
+        ruleId: manualId,
+      })
+    );
+    const allRemoved = await reconnected.inbox.next(
+      (message) =>
+        message.action === "sync_class_app_rules" && message.params.rules.length === 0
+    );
+    assert.deepEqual(allRemoved.params.rules, []);
     await new Promise((resolve) => setTimeout(resolve, 200));
     const afterRemoval = JSON.parse(fs.readFileSync(configPath, "utf8"));
     assert.deepEqual(

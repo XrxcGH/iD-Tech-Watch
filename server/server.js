@@ -66,7 +66,10 @@ function loadConfig() {
       location.buildings ||= [];
       for (const building of location.buildings) {
         building.classes ||= [];
-        for (const klass of building.classes) klass.blockedApplications ||= [];
+        for (const klass of building.classes) {
+          klass.blockedApplications ||= [];
+          for (const rule of klass.blockedApplications) rule.source ||= "manual";
+        }
       }
     }
     let migratedTimeouts = 0;
@@ -370,8 +373,8 @@ function registerAgent(ws, info) {
     buildingId,
     online: true,
     last_seen: Date.now() / 1000,
-    windows: prev.windows || [],
-    processes: prev.processes || [],
+    applications: prev.applications || [],
+    inventoryReportedAt: prev.inventoryReportedAt || 0,
     blocked: prev.blocked || [],
     blockedSites: prev.blockedSites || [],
     sitesAvailable: prev.sitesAvailable,
@@ -386,8 +389,22 @@ function updateDevice(ws, data) {
   const deviceId = wsDevice.get(ws);
   const rec = deviceId && devices.get(deviceId);
   if (!rec) return null;
-  for (const key of ["windows", "processes", "blocked", "blockedSites", "sitesAvailable"])
+  for (const key of ["blocked", "blockedSites", "sitesAvailable"])
     if (key in data) rec[key] = data[key];
+  if (Array.isArray(data.applications)) {
+    rec.applications = sanitizeApplicationInventory(data.applications);
+    rec.inventoryReportedAt = Date.now() / 1000;
+  } else if (Array.isArray(data.processes)) {
+    // Compatibility with agents from before the structured inventory protocol.
+    rec.applications = sanitizeApplicationInventory(
+      data.processes.map((name) => ({
+        process_name: name,
+        display_name: name,
+        executable: name,
+      }))
+    );
+    rec.inventoryReportedAt = Date.now() / 1000;
+  }
   rec.online = true;
   rec.last_seen = Date.now() / 1000;
   return deviceId;
@@ -426,6 +443,7 @@ function orgView() {
           id: rule.id,
           displayName: rule.displayName,
           executable: rule.executable,
+          source: rule.source === "detected" ? "detected" : "manual",
         })),
       })),
     })),
@@ -451,8 +469,8 @@ function devicesView() {
       classId: deviceClassId(rec.device_id, rec.buildingId),
       online: rec.online,
       last_seen: rec.last_seen,
-      windows: rec.windows,
-      processes: rec.processes,
+      applications: rec.applications || [],
+      inventory_reported_at: rec.inventoryReportedAt || 0,
       blocked: rec.blocked,
       blockedSites: rec.blockedSites || [],
       sitesAvailable: rec.sitesAvailable,
@@ -509,12 +527,59 @@ function targetsFor(target) {
 function normalizeExecutableIdentifier(value) {
   let executable = String(value || "").trim().toLowerCase();
   if (executable.endsWith(".exe")) executable = executable.slice(0, -4);
-  if (!/^[a-z0-9][a-z0-9._-]{0,79}$/.test(executable)) {
+  if (!/^[a-z0-9][a-z0-9._ -]{0,79}$/.test(executable)) {
     throw new CommandValidationError(
-      "Executable must be a process name using only letters, numbers, dots, underscores, or hyphens."
+      "Executable must be a process name using only letters, numbers, spaces, dots, underscores, or hyphens."
     );
   }
   return executable;
+}
+
+function sanitizeInventoryText(value, maxLength) {
+  return String(value || "")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/[<>]/g, "")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function sanitizeApplicationInventory(items) {
+  const applications = new Map();
+  for (const item of items.slice(0, 500)) {
+    if (!item || typeof item !== "object") continue;
+    let executable;
+    try {
+      executable = normalizeExecutableIdentifier(item.executable || item.process_name);
+    } catch (_) {
+      continue;
+    }
+    const processName = sanitizeInventoryText(item.process_name || executable, 80);
+    const displayName = sanitizeInventoryText(item.display_name || processName, 100);
+    if (!displayName) continue;
+    const current = applications.get(executable);
+    const candidate = {
+      processName: processName || executable,
+      displayName,
+      executable,
+    };
+    if (!current || current.displayName === current.processName) {
+      applications.set(executable, candidate);
+    }
+  }
+  return [...applications.values()].slice(0, 250);
+}
+
+function detectedApplicationForClass(classId, executable) {
+  let newest = null;
+  for (const [deviceId, rec] of devices) {
+    if (deviceClassId(deviceId, rec.buildingId) !== classId) continue;
+    const application = (rec.applications || []).find((item) => item.executable === executable);
+    if (!application) continue;
+    if (!newest || (rec.inventoryReportedAt || 0) > newest.reportedAt) {
+      newest = { ...application, reportedAt: rec.inventoryReportedAt || 0 };
+    }
+  }
+  return newest;
 }
 
 function classRulesForDevice(deviceId) {
@@ -552,10 +617,18 @@ function applyClassAppRule(message) {
 
   if (message.op === "add") {
     const executable = normalizeExecutableIdentifier(message.executable);
-    if (typeof message.displayName !== "string") {
+    const source = message.source === "detected" ? "detected" : "manual";
+    const detected =
+      source === "detected" ? detectedApplicationForClass(found.klass.id, executable) : null;
+    if (source === "detected" && !detected) {
+      throw new CommandValidationError(
+        "That application is no longer present in this class inventory. Add it as a manual rule instead."
+      );
+    }
+    if (source === "manual" && typeof message.displayName !== "string") {
       throw new CommandValidationError("Application display name is required.");
     }
-    const displayName = message.displayName.trim();
+    const displayName = source === "detected" ? detected.displayName : message.displayName.trim();
     if (!displayName || displayName.length > 100) {
       throw new CommandValidationError(
         "Application display name must be between 1 and 100 characters."
@@ -564,7 +637,7 @@ function applyClassAppRule(message) {
     if (rules.some((rule) => rule.executable === executable)) {
       throw new CommandValidationError("That executable is already blocked for this class.");
     }
-    rules.push({ id: genId("app"), displayName, executable });
+    rules.push({ id: genId("app"), displayName, executable, source });
   } else if (message.op === "remove") {
     const ruleId = String(message.ruleId || "");
     const next = rules.filter((rule) => rule.id !== ruleId);

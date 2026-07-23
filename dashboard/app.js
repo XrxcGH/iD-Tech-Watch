@@ -933,6 +933,204 @@
   }
 
   // ---- class monitor (the live grid) ----
+  const INVENTORY_STALE_SECONDS = 15;
+
+  function inventoryFreshness(device) {
+    const reportedAt = Number(device.inventory_reported_at) || 0;
+    if (!reportedAt) return { stale: true, label: "No inventory reported" };
+    if (!device.online) {
+      return { stale: true, label: `Offline · last inventory ${agoLabel(reportedAt)}` };
+    }
+    const age = Date.now() / 1000 - reportedAt;
+    return age > INVENTORY_STALE_SECONDS
+      ? { stale: true, label: `Stale · reported ${agoLabel(reportedAt)}` }
+      : { stale: false, label: `Current · reported ${agoLabel(reportedAt)}` };
+  }
+
+  function detectedApplicationsForClass(classId) {
+    const choices = new Map();
+    for (const device of devicesInClass(classId)) {
+      const freshness = inventoryFreshness(device);
+      for (const application of device.applications || []) {
+        const executable = String(application.executable || "");
+        if (!executable) continue;
+        const current = choices.get(executable) || {
+          executable,
+          displayName: application.displayName || executable,
+          processName: application.processName || executable,
+          devices: new Set(),
+          newest: 0,
+          current: false,
+        };
+        current.devices.add(device.device_id);
+        current.current ||= !freshness.stale;
+        if ((device.inventory_reported_at || 0) >= current.newest) {
+          current.newest = device.inventory_reported_at || 0;
+          current.displayName = application.displayName || current.displayName;
+          current.processName = application.processName || current.processName;
+        }
+        choices.set(executable, current);
+      }
+    }
+    return [...choices.values()]
+      .map((application) => ({
+        ...application,
+        fields: [application.displayName, application.processName, application.executable],
+        description:
+          `${application.executable} · ${application.devices.size} computer(s) · ` +
+          (application.current
+            ? "currently detected"
+            : application.newest
+              ? `stale, last reported ${agoLabel(application.newest)}`
+              : "offline inventory"),
+      }))
+      .sort((a, b) =>
+        a.displayName.localeCompare(b.displayName, undefined, { sensitivity: "base" })
+      );
+  }
+
+  function applicationAutocomplete(input, displayNameInput, candidates, submit) {
+    const controlId = `application-search-${++searchControlId}`;
+    const listId = `${controlId}-list`;
+    input.id = controlId;
+    input.setAttribute("role", "combobox");
+    input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("aria-expanded", "false");
+    input.setAttribute("aria-controls", listId);
+    input.setAttribute("autocomplete", "off");
+    const list = el("div", {
+      id: listId,
+      class: "app-suggestions",
+      role: "listbox",
+      hidden: true,
+    });
+    const wrap = el("div", { class: "app-autocomplete" }, input, list);
+    let suggestions = [];
+    let activeIndex = -1;
+    let open = false;
+
+    function paintActive() {
+      [...list.querySelectorAll('[role="option"]')].forEach((option, index) => {
+        const active = index === activeIndex;
+        option.classList.toggle("active", active);
+        option.setAttribute("aria-selected", String(active));
+      });
+      const active = list.querySelectorAll('[role="option"]')[activeIndex];
+      if (active) input.setAttribute("aria-activedescendant", active.id);
+      else input.removeAttribute("aria-activedescendant");
+    }
+
+    function commit(suggestion) {
+      if (!suggestion) return;
+      if (suggestion.kind === "detected") {
+        input.value = suggestion.application.executable;
+        displayNameInput.value = suggestion.application.displayName;
+        close();
+        submit("detected");
+      } else {
+        if (!displayNameInput.value.trim()) displayNameInput.value = input.value.trim();
+        close();
+        submit("manual");
+      }
+    }
+
+    function render() {
+      list.replaceChildren();
+      input.setAttribute("aria-expanded", String(open));
+      list.hidden = !open;
+      if (!open) {
+        input.removeAttribute("aria-activedescendant");
+        return;
+      }
+      suggestions.forEach((suggestion, index) => {
+        const detected = suggestion.kind === "detected";
+        const application = suggestion.application;
+        list.append(
+          el(
+            "div",
+            {
+              id: `${listId}-option-${index}`,
+              class: `app-suggestion ${detected ? "detected" : "manual"}`,
+              role: "option",
+              "aria-selected": "false",
+              onmouseenter: () => {
+                activeIndex = index;
+                paintActive();
+              },
+              onmousedown: (event) => event.preventDefault(),
+              onclick: () => commit(suggestion),
+            },
+            el(
+              "span",
+              { class: "app-suggestion-label" },
+              detected ? application.displayName : `Use “${input.value.trim()}”`
+            ),
+            el(
+              "span",
+              { class: "app-suggestion-meta" },
+              detected ? application.description : "Manual rule · not currently detected"
+            )
+          )
+        );
+      });
+      paintActive();
+    }
+
+    function close() {
+      open = false;
+      activeIndex = -1;
+      render();
+    }
+
+    function update() {
+      const query = input.value.trim();
+      if (!query) {
+        suggestions = [];
+        close();
+        return;
+      }
+      const matches = FuzzySearch.rank(query, candidates, (candidate) => candidate.fields)
+        .filter((entry) => entry.matched)
+        .slice(0, 7)
+        .map((entry) => ({ kind: "detected", application: entry.item }));
+      suggestions = matches.length ? matches : [{ kind: "manual" }];
+      open = true;
+      activeIndex = 0;
+      render();
+    }
+
+    input.addEventListener("input", update);
+    input.addEventListener("focus", () => {
+      if (input.value.trim()) update();
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && open) {
+        event.preventDefault();
+        close();
+        return;
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        if (!suggestions.length) return;
+        event.preventDefault();
+        open = true;
+        const delta = event.key === "ArrowDown" ? 1 : -1;
+        activeIndex = (activeIndex + delta + suggestions.length) % suggestions.length;
+        render();
+        return;
+      }
+      if ((event.key === "Enter" || event.key === "Tab") && open && activeIndex >= 0) {
+        event.preventDefault();
+        commit(suggestions[activeIndex]);
+      }
+    });
+    wrap.addEventListener("focusout", () => {
+      setTimeout(() => {
+        if (!wrap.contains(document.activeElement)) close();
+      }, 0);
+    });
+    return wrap;
+  }
+
   function classApplicationRules(meta) {
     if (!meta) return null;
     const rules = meta.c.blockedApplications || [];
@@ -949,15 +1147,15 @@
       "aria-label": "Exact executable or process name",
     });
 
-    const add = () => {
+    const add = (source = "manual") => {
       const name = displayName.value.trim();
       let processName = executable.value.trim().toLowerCase();
       if (processName.endsWith(".exe")) processName = processName.slice(0, -4);
       displayName.setCustomValidity(name ? "" : "Enter a readable application name.");
       executable.setCustomValidity(
-        /^[a-z0-9][a-z0-9._-]{0,79}$/.test(processName)
+        /^[a-z0-9][a-z0-9._ -]{0,79}$/.test(processName)
           ? ""
-          : "Use one exact process name with letters, numbers, dots, underscores, or hyphens."
+          : "Use one exact process name with letters, numbers, spaces, dots, underscores, or hyphens."
       );
       if (!name || !executable.checkValidity()) {
         toast(name ? executable.validationMessage : "Enter a readable application name.");
@@ -970,6 +1168,7 @@
         classId: meta.c.id,
         displayName: name,
         executable: processName,
+        source,
       });
       displayName.value = "";
       executable.value = "";
@@ -986,6 +1185,11 @@
             { class: "class-app-rule" },
             el("span", { class: "class-app-name" }, rule.displayName),
             el("code", {}, rule.executable),
+            el(
+              "span",
+              { class: `rule-source ${rule.source === "detected" ? "detected" : "manual"}` },
+              rule.source === "detected" ? "Detected" : "Manual"
+            ),
             el("span", { class: "spacer" }),
             el(
               "button",
@@ -1007,6 +1211,13 @@
       }
     }
 
+    const autocomplete = applicationAutocomplete(
+      executable,
+      displayName,
+      detectedApplicationsForClass(meta.c.id),
+      add
+    );
+
     return el(
       "section",
       { class: "class-app-rules" },
@@ -1021,8 +1232,8 @@
         "div",
         { class: "class-app-rule-form" },
         displayName,
-        executable,
-        el("button", { class: "btn primary sm", onclick: add }, "Add application")
+        autocomplete,
+        el("button", { class: "btn primary sm", onclick: () => add("manual") }, "Add application")
       )
     );
   }
@@ -1435,6 +1646,45 @@
     );
   }
 
+  function applicationInventory(device) {
+    const freshness = inventoryFreshness(device);
+    const list = el("div", { class: "list application-inventory" });
+    for (const application of device.applications || []) {
+      list.append(
+        el(
+          "div",
+          { class: "row application-row" },
+          el("span", { class: "application-name" }, application.displayName),
+          el("code", {}, application.executable)
+        )
+      );
+    }
+    if (!(device.applications || []).length) {
+      list.append(
+        el(
+          "div",
+          { class: "row muted" },
+          device.online ? "No applications reported." : "Computer is disconnected."
+        )
+      );
+    }
+    return el(
+      "div",
+      { class: "list-wrap inventory-wrap" },
+      el(
+        "div",
+        { class: "list-title" },
+        `Open applications (${(device.applications || []).length})`,
+        el(
+          "span",
+          { class: `inventory-freshness ${freshness.stale ? "stale" : "current"}` },
+          freshness.label
+        )
+      ),
+      list
+    );
+  }
+
   function openDevicePanel(d) {
     const t = { scope: "device", deviceId: d.device_id };
     const dispatch = (a, p) => command(t, a, p);
@@ -1453,7 +1703,11 @@
         el("span", { class: "spacer" }),
         el("button", { class: "btn ghost sm", onclick: closeOverlay }, "✕")
       ),
-      el("div", { class: "sheet-sub" }, `${(d.windows || []).length} open window(s) · ${(d.processes || []).length} apps · ${d.online ? "online" : "offline"}`)
+      el(
+        "div",
+        { class: "sheet-sub" },
+        `${(d.applications || []).length} open application(s) · ${d.online ? "online" : "offline"}`
+      )
     );
 
     if (d.activeMessage) sheet.append(messageStatus(d.activeMessage));
@@ -1468,11 +1722,7 @@
       sheet.append(chips);
     }
 
-    if ((d.windows || []).length) {
-      const list = el("div", { class: "list windows" });
-      d.windows.forEach((w) => list.append(el("div", { class: "row" }, w)));
-      sheet.append(el("div", { class: "list-wrap" }, el("div", { class: "list-title" }, "Open windows"), list));
-    }
+    sheet.append(applicationInventory(d));
 
     sheet.append(
       el(
@@ -1540,18 +1790,7 @@
         card.append(el("div", { class: "warn" }, "⚠ Website blocks need the agent to run as Administrator on this computer."));
     }
 
-    const winList = el("div", { class: "list windows" });
-    if (d.windows && d.windows.length) d.windows.forEach((w) => winList.append(el("div", { class: "row" }, w)));
-    else winList.append(el("div", { class: "row muted" }, d.online ? "—" : "offline"));
-    card.append(
-      el("div", { class: "list-wrap" }, el("div", { class: "list-title" }, `Open windows (${(d.windows || []).length})`), winList)
-    );
-
-    const procList = el("div", { class: "list procs" });
-    (d.processes || []).forEach((p) => procList.append(el("div", { class: "row" }, p)));
-    card.append(
-      el("details", { class: "apps" }, el("summary", {}, `Running apps (${(d.processes || []).length})`), procList)
-    );
+    card.append(applicationInventory(d));
 
     const t = { scope: "device", deviceId: d.device_id };
     const dispatch = (action, params) => command(t, action, params);
@@ -2030,8 +2269,16 @@
       ] },
     ] };
     D.org = [loc];
-    const wins = ["Roblox Studio", "Scratch — Google Chrome", "Visual Studio Code", "Minecraft", "YouTube — Google Chrome", "File Explorer", "Notepad", "Python 3.12 — IDLE", "poki.com — Chrome"];
-    const procs = ["chrome", "Code", "python", "RobloxStudioBeta", "explorer", "notepad", "Discord", "steam", "msedge"];
+    const applications = [
+      { displayName: "Google Chrome", processName: "chrome", executable: "chrome" },
+      { displayName: "Visual Studio Code", processName: "code", executable: "code" },
+      { displayName: "Python", processName: "python", executable: "python" },
+      { displayName: "Roblox Studio", processName: "robloxstudiobeta", executable: "robloxstudiobeta" },
+      { displayName: "Notepad", processName: "notepad", executable: "notepad" },
+      { displayName: "Discord", processName: "discord", executable: "discord" },
+      { displayName: "Steam", processName: "steam", executable: "steam" },
+      { displayName: "Microsoft Edge", processName: "msedge", executable: "msedge" },
+    ];
     const names = ["Ava", "Liam", "Noah", "Mia", "Zoe", "Kai", "Leo", "Ivy", "Max", "Ada", "Sam", "Eli", "Nia", "Rex", "Uma"];
     const devices = {};
     let n = 0;
@@ -2042,8 +2289,8 @@
           device_id: id, hostname: `${names[n % names.length]}-PC`, os: "Windows",
           locationId: loc.id, buildingId: bId, classId: cId,
           online: Math.random() > 0.15, last_seen: Date.now() / 1000 - Math.floor(Math.random() * 120),
-          windows: shuffle(wins).slice(0, 3 + Math.floor(Math.random() * 3)),
-          processes: shuffle(procs).slice(0, 5), blocked: [], blockedSites: [], sitesAvailable: true, activeMessage: null,
+          inventory_reported_at: Date.now() / 1000 - Math.floor(Math.random() * 40),
+          applications: shuffle(applications).slice(0, 5), blocked: [], blockedSites: [], sitesAvailable: true, activeMessage: null,
         };
         n++;
       }
@@ -2067,6 +2314,7 @@
       const d = D.devices[ids[Math.floor(Math.random() * ids.length)]];
       if (d) {
         d.last_seen = Date.now() / 1000;
+        if (d.online) d.inventory_reported_at = Date.now() / 1000;
         if (Math.random() < 0.25) d.online = !d.online;
       }
       if (nav.view === "monitor") render();
@@ -2082,6 +2330,7 @@
           id: `demo-rule-${Date.now()}`,
           displayName: obj.displayName,
           executable: obj.executable,
+          source: obj.source === "detected" ? "detected" : "manual",
         });
       } else if (obj.op === "remove") {
         meta.c.blockedApplications = rules.filter((rule) => rule.id !== obj.ruleId);
