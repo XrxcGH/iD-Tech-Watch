@@ -1,292 +1,213 @@
 # iD Tech Classroom Monitor
 
-A classroom-management system for iD Tech Camps. Instructors watch the open
-windows on every laptop in their class, close unauthorized apps, and temporarily
-block games and gaming websites (Roblox, Minecraft, Steam, poki.com, …). Admins
-manage the whole org — **Location → Building → Class → Computer** — from a web
-panel, with everything editable week to week.
+A lightweight classroom-control hub for instructors and directors at iD Tech Camps. A Node.js
+server hosts the browser dashboard and communicates with a small agent on each
+student Windows computer over WebSockets.
 
-Beta target: **Stanford campus** (single hub on the classroom LAN). The Location
-tier is the worldwide-scaling axis: add "MIT", "London", etc. when you expand.
+The project intentionally has no runtime npm dependencies and no frontend
+framework.
 
-**Runtime: Node.js 18+ (uses the built-in global WebSocket client, stable in
-Node 22+). Zero external dependencies — nothing to `npm install`.**
+## Current capabilities
 
----
+- Instructor and director sign-in
+- Location, building, and class organization with fuzzy location lookup and
+  keyboard autocomplete
+- Live computer status, open-application inventory, seating layouts, and
+  class assignments
+- Informational, warning, and transition messages, including optional
+  server-authoritative expiration
+- Pause/resume, browser closure, focused-window closure with per-device
+  results, and temporary or indefinite application/site blocks
+- Persistent class application rules selected from detected applications or
+  entered as exact custom executable identifiers
+- Scheduled classroom actions
+- Authenticated download of the packaged `iD-Tech-Watch.exe` client
+- A Windows watchdog that restarts an accidentally closed agent and honors an
+  explicit shutdown
 
-## ⚠️ Responsible use (read first)
+## Requirements
 
-For **camp-managed laptops** in a **supervised, in-person classroom** with minors:
+Hub:
 
-- **Transparent, not covert.** The agent runs visibly, prints what it's doing,
-  and shows a "monitoring is active" notice. Tell students (and parents, per iD
-  Tech policy) that class laptops are monitored.
-- **Minimal data.** It reports *window titles and app names* only — no
-  keystrokes, passwords, webcams, or continuous screenshots.
-- Do not deploy on personal/BYO devices or outside a supervised class.
+- Node.js 22 or newer. The server and tests use Node's built-in WebSocket
+  client; there are no npm packages to install.
 
----
+Student client:
 
-## What it can do
+- Windows
+- Node.js 22 or newer available as `node.exe`
+- Windows PowerShell 5.1
 
-**View** — a live grid of every laptop in a class, showing open window titles and
-running apps.
+Building the downloadable client additionally requires the .NET Framework C#
+compiler included with supported Windows installations.
 
-**Seating chart (canvas mode)** — switch the class view from **▦ Grid** to **🪑
-Seating** to get a 2D map of the room. Drag each computer to where the student
-actually sits so you remember who's who; positions are saved per class (and shared
-with any co-instructor viewing the same class). Tap/click a computer on the map to
-open its control panel (block games, close apps, message, refresh). Works with both
-mouse and touch, so it's usable on a phone or tablet while you walk the room. Use
-**Reset layout** to auto-arrange again.
+## Run the hub
 
-**Block apps** — one click blocks a game everywhere it's selected; the agent kills
-it now and keeps killing it for a chosen duration (5 min … until you lift it).
-Built-in presets:
+From the repository root:
 
-| Preset            | Blocks (apps)                | Blocks (websites)                              |
-|-------------------|------------------------------|------------------------------------------------|
-| Roblox            | `roblox*`                    | roblox.com                                     |
-| Minecraft         | `*minecraft*`                | minecraft.net                                  |
-| Fortnite          | `*fortnite*`                 | —                                              |
-| Steam             | `*steam*`                    | steampowered.com, steamcommunity.com           |
-| Epic Games        | `*epicgames*`, `*fortnite*`  | epicgames.com                                  |
-| Gaming websites   | —                            | poki.com, coolmathgames.com, crazygames.com, miniclip.com, y8.com, addictinggames.com, kongregate.com, armorgames.com, friv.com, gamejolt.com |
-| All games + sites | everything above             | everything above                               |
-
-Plus **Custom app…** (any process-name substring, e.g. `discord`) and **Custom
-website…** (any domain, e.g. `twitch.tv`). Also **Close app…** (kill once) and
-**Message…** (pop a note on the student's screen).
-
-**Block websites** works by editing the laptop's hosts file, so it needs the agent
-to run **as Administrator** (see below). App blocking does not need elevation.
-
-> Notes / limits: "minecraft" matches the launcher + Bedrock edition; Minecraft
-> **Java** runs as `javaw.exe`, which is intentionally *not* matched so we don't
-> kill legitimate Java used in coding classes (block `javaw` via Custom app if
-> your camp doesn't use Java). Website blocks stop *new* page loads; an
-> already-open tab isn't force-closed. If a browser has **Secure DNS / DNS-over-
-> HTTPS** enabled it can bypass the hosts file — disable it (or push a browser
-> policy) on lab machines.
-
----
-
-## Concepts
-
-```
-Location (Stanford)
-  └─ Building (Gates Computer Science)
-       └─ Class (Roblox Game Dev — instructor, room)   ← renamed weekly by admin
-            └─ Computer (a laptop running the agent)
-```
-
-- **Computers** are physical laptops. Each runs the agent, configured once with
-  its stable **location + building**. They appear in the console automatically.
-- **Classes** are managed centrally by an admin (name, instructor, room) and
-  change every week — *without touching any laptop*. Admins assign computers to
-  the week's class in the admin panel.
-- **Locations & buildings** auto-populate as agents check in, and are editable.
-
-## Roles
-
-| Role       | Signs in with          | Can do                                                                 |
-|------------|------------------------|------------------------------------------------------------------------|
-| Instructor | (optional access code) | Drill down Location → Building → Class and control that class's computers |
-| Admin      | admin password         | Everything an instructor can, plus manage the org, classes, instructors, computer assignments, and settings |
-
-The initial admin password comes from `IDT_ADMIN_PASSWORD` (or defaults to
-`changeme` with a warning). Change it in **Admin → Settings**. Only a salted
-scrypt hash is stored, in `data/config.json`.
-
----
-
-## 🧪 Beta test on ONE local machine (step by step)
-
-This runs the **hub and a "student" agent on the same computer** — the fastest way
-to try everything. (Windows PowerShell shown; macOS/Linux is the same commands.)
-
-**1. Install Node.js 18+** (22+ recommended). Check it:
-
-```bash
-node --version
-```
-
-If that errors, install from https://nodejs.org (LTS), then reopen your terminal.
-
-**2. Start the hub.** In a terminal, from the project folder:
-
-```bash
-$env:IDT_ADMIN_PASSWORD = "letmein"
+```powershell
 node server/server.js
 ```
 
-You'll see something like:
+Or:
 
-```
-[hub] ready — open the console in a browser:
-[hub]   on this computer:    http://localhost:8765/
-[hub]   from other laptops:  http://10.0.0.42:8765/
+```powershell
+powershell -File scripts/run_server.ps1
 ```
 
-Leave this terminal running.
+Open `http://localhost:8765/`. Other computers on the LAN use the hub
+machine's displayed LAN address.
 
-**3. Start an agent.** Open a **second** terminal in the same folder. For the full
-experience (including website blocking) run it elevated with the helper:
+Important environment settings:
 
-```bash
-.\scripts\run_agent.ps1 -Server ws://localhost:8765 -Location "Stanford" -Building "Gates Computer Science" -Class "My Test Class"
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `HOST` | `0.0.0.0` | Hub bind address |
+| `PORT` | `8765` | Hub HTTP/WebSocket port |
+| `IDT_ADMIN_PASSWORD` | `changeme` | Initial director password; always override outside local development |
+| `IDT_ENROLL_TOKEN` | empty | Optional shared secret required when agents enroll |
+| `IDT_KEEP_AWAKE` | disabled | Set to `1` to keep the hub awake |
+| `IDT_CONFIG_PATH` | `data/config.json` | Server configuration location |
+| `IDT_AGENT_EXE_PATH` | `dist/iD-Tech-Watch.exe` | Server-controlled packaged-client path |
+
+The first run creates `data/config.json`. Director and instructor settings can
+then be managed in the dashboard. The director role is represented internally
+as `admin`.
+
+## Build and distribute the Windows client
+
+Build the exact file served by the dashboard:
+
+```powershell
+powershell -File scripts/build-agent-exe.ps1
 ```
 
-This asks for Administrator (needed for website blocking) and adds `--keep-awake`.
-To skip elevation (app blocking only), add `-NoElevate`, or run the agent directly:
+Output:
 
-```bash
-node agent/agent.js --server ws://localhost:8765 --location "Stanford" --building "Gates Computer Science" --class "My Test Class"
+```text
+dist\iD-Tech-Watch.exe
 ```
 
-**4. Open the console.** Go to **http://localhost:8765/**, click **Admin**, and
-sign in with the password from step 2 (`letmein`).
+After signing in as an instructor or director, use the fixed bottom-right
+`Download iD-Tech-Watch` button. The browser sends the current session token;
+the server rechecks the role and serves only the fixed executable path. An
+unauthenticated request, an unsupported HTTP method, or a path variant is
+rejected.
 
-**5. Look around.**
-- **Admin panel** → *Organization*: rename the class, set the instructor and room.
-  *Computers*: your laptop is listed and assigned to the class.
-- Click **Monitor** (top bar) → **Stanford → Gates… → your class**. You'll see this
-  laptop with its live open windows.
-- Switch to **🪑 Seating** and drag the computer around the room; reload the page and
-  it stays put. Tap it to open its control panel.
+On first launch, the client asks for:
 
-**6. Try controls** (on yourself — safe to test):
-- Open a browser tab to `poki.com`, then in the class toolbar pick **Block… →
-  Gaming websites**. Reload the tab — it should fail to load. (If it still loads,
-  your browser's Secure DNS is bypassing the hosts file; turn it off.)
-- Open something like Notepad, then **Block… → Custom app… →** `notepad`. It closes
-  and stays closed for the chosen duration.
-- Click **Unblock all** to clear everything.
+- Hub WebSocket URL, such as `ws://192.168.1.20:8765`
+- Location
+- Building
+- Optional class hint
+- Optional enrollment token
 
-That's a full end-to-end beta on one machine.
+The executable embeds the JavaScript agent and watchdog. It extracts them and
+stores its configuration under the active Windows user's Documents folder:
 
----
-
-## Adding a second laptop (or a whole classroom)
-
-The hub stays on one machine (your admin/instructor laptop). Each **student laptop**
-just needs Node and the agent:
-
-1. Copy this folder to the laptop (or at minimum `agent/agent.js` + the `scripts`
-   folder). A USB stick or shared drive is fine.
-2. Install Node.js 18+ on it.
-3. Find the hub's **LAN address** in the hub's startup log (e.g.
-   `http://10.0.0.42:8765/`).
-4. On the hub machine, allow Node through the firewall the first time Windows asks
-   (choose **Private networks**). Both machines must be on the same Wi-Fi/LAN.
-5. On the student laptop, run the agent pointed at the hub's LAN IP:
-
-```bash
-.\scripts\run_agent.ps1 -Server ws://10.0.0.42:8765 -Location "Stanford" -Building "Gates Computer Science"
+```text
+%USERPROFILE%\Documents\iD-Tech-Watch\
 ```
 
-The laptop appears in the admin **Computers** list automatically; assign it to a
-class and it shows up for the instructor.
+The exact Documents directory is resolved through Windows, so redirected or
+localized Documents folders are supported.
 
-Optional shared secret so only your agents can join: set `IDT_ENROLL_TOKEN` on the
-hub, and pass `--token <same value>` to each agent.
+The runtime directory contains `agent.js`, `agent-watchdog.ps1`, `config.json`,
+PID files while running, `watchdog.log`, and an optional `shutdown.flag`.
+Rerunning the launcher updates the embedded runtime files and starts monitoring
+without opening a second watchdog.
 
----
+### Authorized shutdown
 
-## Keeping it running (even when laptops sleep)
+Run the same executable with:
 
-- **Don't sleep while running.** The agent's `--keep-awake` (added automatically by
-  `run_agent.ps1`) holds a wake lock so the laptop won't sleep while class is on.
-  For the hub, start it with `$env:IDT_KEEP_AWAKE = "1"` before `node server/server.js`.
-  The wake lock is released as soon as the process stops (screens may still turn
-  off; the machine just won't sleep).
-- **Auto-start on boot + auto-restart.** On each student laptop, in an
-  **Administrator** PowerShell:
-
-```bash
-.\scripts\install-agent-startup.ps1 -Server ws://10.0.0.42:8765 -Location "Stanford" -Building "Gates Computer Science"
+```powershell
+iD-Tech-Watch.exe --shutdown
 ```
 
-  This registers a Scheduled Task that launches the agent at every logon, elevated
-  (so website blocking works), keeps it awake, and restarts it if it exits. Remove
-  it with `Unregister-ScheduledTask -TaskName "iDTechClassroomAgent" -Confirm:$false`.
-- The agent also **auto-reconnects** to the hub after any network drop or sleep, and
-  keeps enforcing active blocks even while briefly offline.
+This writes `shutdown.flag`, stops the current agent and watchdog using their
+recorded process IDs, and prevents watchdog restart. Running the executable
+normally again removes the flag and resumes monitoring.
 
-> Even with a wake lock, if a laptop is manually closed/hibernated it stops until it
-> wakes; on wake the agent reconnects within a few seconds. Fully preventing
-> hibernation is a Windows power-plan setting (`powercfg`) that's best pushed via
-> your device policy.
+For scripted deployment, setup can be supplied without the dialog:
 
----
-
-## Message protocol (WebSocket JSON)
-
-**Agent → Hub:** `register` (device_id, hostname, os, location, building, klass?,
-token) · `status` (windows, processes, blocked, blockedSites, sitesAvailable).
-
-**Hub → Agent:** `command` with `action` ∈ `kill_process | block_app | unblock_app |
-block_site | unblock_site | unblock_all | message | list_now`. `block_app` accepts
-`pattern` or `patterns[]`; `block_site` accepts `domain` or `domains[]`; both accept
-`duration_sec` (omit/0 = until lifted).
-
-**Dashboard ↔ Hub:** REST `POST /api/login` → session token; WS `/ws/dashboard`
-first sends `{type:"auth",token}`, then receives `{type:"state", org, devices}` and
-sends `command` (any role) / `org` mutations (admin only). Command targets:
-`{scope}` ∈ `device | class | building | location | all`.
-
----
-
-## Scaling worldwide (structure in place; most dormant for beta)
-
-- **Location tier — done.** Model + UI support many campuses; beta uses one.
-- **Persistence — done (beta grade).** JSON at `data/config.json`. `// TODO(scale)`
-  marks where Postgres/Redis would go for many hubs.
-- **Auth — done (beta grade).** Admin password (scrypt) + optional instructor code
-  + session tokens. Next: per-instructor SSO accounts and per-device certs.
-- **Transport security — next.** Put the hub behind Caddy/nginx for TLS + `wss://`.
-  Never run plain `ws://` outside a trusted LAN.
-- **Regional hubs — next.** One hub per region (or a cloud relay keyed by location).
-- **Agent packaging — next.** Sign the agent and ship via MDM (Intune / Jamf); the
-  Scheduled-Task script here is the beta stand-in.
-- **Roster sync — next.** Pull locations/buildings/classes from iD Tech scheduling.
-
----
-
-## Project layout
-
-```
-iD-Tech-Monitoring-App/
-├── README.md
-├── package.json
-├── server/
-│   └── server.js       # hub: WebSocket router, auth, org model, persistence (0 deps)
-├── agent/
-│   └── agent.js        # student-laptop agent: monitor, block apps + websites, keep-awake (0 deps)
-├── dashboard/
-│   ├── index.html
-│   ├── app.js          # SPA: login / instructor drill-down + seating canvas / admin panel
-│   └── style.css       # iD Green theme (brand colors are CSS variables)
-├── scripts/
-│   ├── run_server.ps1            # start the hub
-│   ├── run_agent.ps1            # run an agent (self-elevates + keep-awake)
-│   └── install-agent-startup.ps1 # auto-start the agent at logon (Scheduled Task)
-└── data/               # created at runtime: config.json (git-ignored)
+```powershell
+iD-Tech-Watch.exe --server ws://HUB:8765 --location Stanford --building Lab --class Room101 --keep-awake
 ```
 
----
+## Direct development agent
 
-## Verified
+For development without the packaged launcher:
 
-Automated end-to-end tests pass, covering: admin login (rejects wrong password),
-open instructor login, authenticated WebSocket + rejection of bad tokens, seeded
-Stanford location, agents auto-populating buildings/classes, class-hint
-auto-assignment, live window + process reporting, admin class edits persisting,
-instructors blocked from admin ops, command routing by scope, timed app blocking,
-**multi-app preset blocking**, **website blocking that writes/cleans the hosts file
-(tested against a temp file — never the real one) and reports `sitesAvailable`**,
-URL normalization, `unblock_all` clearing apps + sites, and config persistence. The
-login, admin panel, instructor drill-down, iD Green theme, the Block menu, and the
-**seating canvas** (drag-to-move persisting per class, tap-to-open control panel,
-mobile bottom-sheet + touch-drag) were driven and confirmed in a browser (desktop
-and mobile viewports) with no console errors.
+```powershell
+powershell -File scripts/run_agent.ps1 `
+  -Server ws://127.0.0.1:8765 `
+  -Location Stanford `
+  -Building "Main Building" `
+  -Class "Room 101"
+```
+
+The agent may request elevation because pause overlays, process control, and
+site blocking can require administrator access.
+
+## Security model
+
+- Dashboard WebSockets authenticate with a 12-hour in-memory session token.
+- The download endpoint independently validates a Bearer token and permits
+  instructor/director roles only.
+- Dashboard commands are checked against a server allowlist; internal sync
+  actions cannot be submitted by a browser.
+- Durations are validated server-side and converted to absolute expiration
+  timestamps.
+- Application rules use normalized exact executable identifiers. Client labels
+  and detected status are not trusted blindly.
+- The download route never accepts a filesystem path from the request.
+- Dashboard DOM construction uses text nodes for untrusted values.
+
+For deployment beyond a trusted camp LAN, add TLS (`https`/`wss`), a durable
+identity provider, per-location authorization, signed binaries, and managed
+device deployment. The current enrollment token and client configuration are
+stored locally and should be protected with normal Windows account controls.
+
+## Validation
+
+Run all repository integration tests:
+
+```powershell
+npm test
+```
+
+Useful focused checks:
+
+```powershell
+node --test test/fuzzy-search.test.js
+node --test test/message-state.test.js
+node --test test/class-controls.test.js
+node --test test/download-route.test.js
+```
+
+Syntax checks:
+
+```powershell
+node --check server/server.js
+node --check agent/agent.js
+node --check dashboard/app.js
+```
+
+The generated `dist/` directory is intentionally ignored. Build the executable
+before starting a hub that must offer downloads.
+
+## Repository map
+
+```text
+server/server.js                 HTTP, authentication, persistence, WebSockets
+dashboard/                       Browser UI and fuzzy-search helper
+agent/agent.js                   Windows monitoring/control agent
+launcher/iD-Tech-Watch.cs        Packaged client bootstrap and setup UI
+scripts/agent-watchdog.ps1       Agent restart and shutdown lifecycle
+scripts/build-agent-exe.ps1      Self-contained EXE build
+scripts/run_server.ps1           Hub development launcher
+scripts/run_agent.ps1            Direct agent development launcher
+scripts/install-agent-startup.ps1 Legacy scheduled-task development installer
+test/                            Focused protocol and integration tests
+```

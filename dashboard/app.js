@@ -323,6 +323,38 @@
     render();
   }
 
+  async function downloadAgent(button) {
+    if (!auth || DEMO) return;
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = "Preparing download…";
+    try {
+      const response = await fetch("/download/id-tech-watch.exe", {
+        headers: { authorization: `Bearer ${auth.token}` },
+      });
+      if (!response.ok) {
+        let detail = "The client download is unavailable.";
+        try {
+          const body = await response.json();
+          if (body.error) detail = body.error;
+        } catch (_) {}
+        throw new Error(detail);
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const link = el("a", { href: url, download: "iD-Tech-Watch.exe" });
+      document.body.append(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      toast("iD-Tech-Watch download started.");
+    } catch (error) {
+      toast(error.message || "The client download failed.");
+    } finally {
+      button.disabled = false;
+      button.textContent = original;
+    }
+  }
+
   // -------------------------------------------------------- selective rerender
   function adminSig() {
     return JSON.stringify({
@@ -416,12 +448,20 @@
       !DEMO ? el("button", { class: "btn ghost sm", onclick: logout }, "Sign out") : null
     );
     n6.append(right);
-    // fixed download button (bottom-right), styled like the Monitor button
-    const download = el(
-      "a",
-      { class: "download-fab", href: "/download/id-tech-watch.exe", title: "Download the iD Tech Watch client (.exe)" },
-      "⬇ Client .exe"
-    );
+    const download = !DEMO
+      ? el(
+          "button",
+          {
+            class: "download-fab",
+            type: "button",
+            onclick(event) {
+              downloadAgent(event.currentTarget);
+            },
+            title: "Download the iD-Tech-Watch Windows client",
+          },
+          "Download iD-Tech-Watch"
+        )
+      : null;
     wrap.append(n6, el("main", { class: "content" }, content), download);
     return wrap;
   }

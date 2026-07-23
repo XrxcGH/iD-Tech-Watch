@@ -848,10 +848,10 @@ process.on("SIGTERM", () => cleanupAndExit(0));
 // --------------------------------------------------------------------- args
 function parseArgs() {
   const a = {
-    server: null,
-    location: "Stanford", // stable physical campus
-    building: "Main Building", // stable physical building
-    klass: "", // optional first-setup hint; class is normally managed by admin
+    server: process.env.IDT_SERVER || null,
+    location: process.env.IDT_LOCATION || "Stanford", // stable physical campus
+    building: process.env.IDT_BUILDING || "Main Building", // stable physical building
+    klass: process.env.IDT_CLASS || "", // optional first-setup hint; class is normally managed by admin
     device: null,
     token: process.env.IDT_ENROLL_TOKEN || "",
     interval: STATUS_INTERVAL_DEFAULT,

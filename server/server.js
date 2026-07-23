@@ -36,6 +36,9 @@ const ENROLL_TOKEN = process.env.IDT_ENROLL_TOKEN || ""; // optional agent secre
 const DASHBOARD_DIR = path.join(__dirname, "..", "dashboard");
 const DATA_DIR = path.join(__dirname, "..", "data");
 const CONFIG_PATH = process.env.IDT_CONFIG_PATH || path.join(DATA_DIR, "config.json");
+const AGENT_EXE_PATH =
+  process.env.IDT_AGENT_EXE_PATH ||
+  path.join(__dirname, "..", "dist", "iD-Tech-Watch.exe");
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
@@ -425,15 +428,18 @@ function disconnectAgent(ws) {
 }
 
 // ---- state broadcast -----------------------------------------------------
-function orgView() {
-  // strip internal aliases from what we ship to the browser
+function orgView(viewer) {
+  // Strip internal aliases and never disclose instructor access codes to an
+  // instructor session. Directors need the value for the settings editor.
+  const isAdmin = viewer && viewer.role === "admin";
   return config.locations.map((loc) => ({
     id: loc.id,
     name: loc.name,
     buildings: loc.buildings.map((b) => ({
       id: b.id,
       name: b.name,
-      code: b.code || "8676",
+      code: isAdmin ? b.code || "8676" : undefined,
+      codeRequired: !!(b.code || "8676"),
       classes: b.classes.map((c) => ({
         id: c.id,
         name: c.name,
@@ -457,9 +463,16 @@ function activeMessageFor(deviceId) {
   return { ...message };
 }
 
-function devicesView() {
+function devicesView(viewer) {
   const out = {};
   for (const rec of devices.values()) {
+    if (
+      viewer &&
+      viewer.role === "instructor" &&
+      !viewer.allowedBuildings.has(rec.buildingId)
+    ) {
+      continue;
+    }
     out[rec.device_id] = {
       device_id: rec.device_id,
       hostname: rec.hostname,
@@ -480,26 +493,92 @@ function devicesView() {
   return out;
 }
 
-function stateMessage() {
+function stateMessage(viewer) {
   return {
     type: "state",
-    org: orgView(),
-    devices: devicesView(),
-    layouts: config.layouts,
-    schedules: config.schedules,
+    org: orgView(viewer),
+    devices: devicesView(viewer),
+    layouts: viewer && viewer.role === "admin" ? config.layouts : allowedLayouts(viewer),
+    schedules: viewer && viewer.role === "admin" ? config.schedules : [],
     instructorCodeRequired: !!config.auth.instructorCode,
   };
 }
 
 function broadcastState() {
-  const msg = stateMessage();
   for (const ws of [...dashboards]) {
     if (ws.closed) dashboards.delete(ws);
-    else ws.sendJSON(msg);
+    else ws.sendJSON(stateMessage(ws));
   }
 }
 
 // ---- command routing -----------------------------------------------------
+const TARGET_FIELDS = {
+  device: "deviceId",
+  location: "locationId",
+  building: "buildingId",
+  class: "classId",
+};
+
+function normalizeTarget(source) {
+  if (!source || typeof source !== "object" || Array.isArray(source)) {
+    throw new CommandValidationError("Command target is required.");
+  }
+  const scope = String(source.scope || "");
+  if (scope === "all") return { scope };
+  const field = TARGET_FIELDS[scope];
+  const id = field && typeof source[field] === "string" ? source[field].trim() : "";
+  if (!field || !id || id.length > 200) {
+    throw new CommandValidationError("Command target is invalid.");
+  }
+  return { scope, [field]: id };
+}
+
+function targetBuildingIds(target) {
+  if (target.scope === "all") {
+    return config.locations.flatMap((location) =>
+      location.buildings.map((building) => building.id)
+    );
+  }
+  if (target.scope === "location") {
+    const location = findLocation(target.locationId);
+    return location ? location.buildings.map((building) => building.id) : [];
+  }
+  if (target.scope === "building") {
+    return findBuilding(target.buildingId) ? [target.buildingId] : [];
+  }
+  if (target.scope === "class") {
+    const found = findClass(target.classId);
+    return found ? [found.building.id] : [];
+  }
+  const rec = devices.get(target.deviceId);
+  return rec ? [rec.buildingId] : [];
+}
+
+function requireTargetAccess(viewer, target) {
+  if (viewer.role === "admin") return;
+  const buildingIds = targetBuildingIds(target);
+  if (
+    !buildingIds.length ||
+    buildingIds.some((buildingId) => !viewer.allowedBuildings.has(buildingId))
+  ) {
+    throw new CommandValidationError(
+      "Enter the building instructor code before controlling its computers."
+    );
+  }
+}
+
+function allowedLayouts(viewer) {
+  if (!viewer || viewer.role !== "instructor") return {};
+  const allowed = {};
+  for (const [key, layout] of Object.entries(config.layouts)) {
+    const buildingId = key.startsWith("un:")
+      ? key.slice(3)
+      : (findClass(key) || {}).building?.id;
+    if (buildingId && viewer.allowedBuildings.has(buildingId)) allowed[key] = layout;
+  }
+  return allowed;
+}
+
 function matchesTarget(deviceId, rec, target) {
   const scope = (target && target.scope) || "device";
   if (scope === "all") return true;
@@ -712,6 +791,20 @@ function requestForegroundClose(dashboard, target) {
 const MESSAGE_KINDS = new Set(["info", "warning", "transition"]);
 const MAX_MESSAGE_TIMEOUT_SEC = 24 * 60 * 60;
 const MAX_BLOCK_DURATION_SEC = 20 * 60 * 60;
+const DASHBOARD_COMMANDS = new Set([
+  "block_app",
+  "block_site",
+  "clear_message",
+  "close_browsers",
+  "kill_process",
+  "list_now",
+  "message",
+  "pause",
+  "resume",
+  "unblock_all",
+  "unblock_app",
+  "unblock_site",
+]);
 
 class CommandValidationError extends Error {}
 
@@ -749,6 +842,10 @@ function sendMessageState(deviceId) {
 }
 
 function sendCommand(target, action, params) {
+  if (!DASHBOARD_COMMANDS.has(action)) {
+    throw new CommandValidationError("Unknown or reserved command.");
+  }
+
   if (action === "message") {
     const message = normalizeMessageParams(params);
     if (!message.text) return 0;
@@ -1169,18 +1266,29 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, { token: issueToken("instructor"), role });
   }
 
-  // Download the packaged agent (built separately via scripts/build-agent-exe.ps1)
+  // Fixed, authenticated route: callers cannot supply or influence a file path.
   if (urlPath === "/download/id-tech-watch.exe") {
-    const exe = path.join(BASE_DIR, "dist", "iD-Tech-Watch.exe");
-    return fs.readFile(exe, (err, data) => {
+    if (req.method !== "GET") {
+      res.setHeader("allow", "GET");
+      return sendJson(res, 405, { error: "Method not allowed." });
+    }
+    const match = /^Bearer ([a-f0-9]{48})$/.exec(String(req.headers.authorization || ""));
+    const session = match ? validateToken(match[1]) : null;
+    if (!session || (session.role !== "admin" && session.role !== "instructor")) {
+      return sendJson(res, 401, {
+        error: "Sign in as an instructor or director to download the client.",
+      });
+    }
+    return fs.readFile(AGENT_EXE_PATH, (err, data) => {
       if (err) {
-        res.writeHead(404, { "content-type": "text/plain" });
-        return res.end(
-          "iD-Tech-Watch.exe has not been built yet. On the hub machine run:\n  powershell -File scripts/build-agent-exe.ps1\nthen this download will work."
-        );
+        return sendJson(res, 404, {
+          error:
+            "iD-Tech-Watch.exe is not available. On the hub machine run: powershell -File scripts/build-agent-exe.ps1",
+        });
       }
       res.writeHead(200, {
-        "content-type": "application/octet-stream",
+        "cache-control": "no-store",
+        "content-type": "application/vnd.microsoft.portable-executable",
         "content-disposition": 'attachment; filename="iD-Tech-Watch.exe"',
         "content-length": data.length,
       });
@@ -1202,7 +1310,12 @@ const server = http.createServer(async (req, res) => {
 
   // SPA fallback: any other GET (e.g. /demo, /Stanford/Ada) serves the app so
   // client-side routing can handle it. (Unknown /api or /ws paths 404.)
-  if (req.method === "GET" && !urlPath.startsWith("/api") && !urlPath.startsWith("/ws")) {
+  if (
+    req.method === "GET" &&
+    !urlPath.startsWith("/api") &&
+    !urlPath.startsWith("/ws") &&
+    !urlPath.startsWith("/download")
+  ) {
     return fs.readFile(path.join(DASHBOARD_DIR, "index.html"), (err, data) => {
       if (err) {
         res.writeHead(500, { "content-type": "text/plain" });

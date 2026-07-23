@@ -206,6 +206,19 @@ test("focused-window, inventory, and class rule protocols stay authorized and ex
       initialState.org[0].buildings[0].classes[1].blockedApplications[0].source,
       "manual"
     );
+    dashboard.ws.send(
+      JSON.stringify({
+        type: "command",
+        action: "run_arbitrary_command",
+        target: { scope: "all" },
+        params: { command: "whoami" },
+      })
+    );
+    const unknownCommand = await dashboard.inbox.next(
+      (message) => message.type === "error"
+    );
+    assert.match(unknownCommand.detail, /Unknown or reserved command/);
+
     agent.ws.send(
       JSON.stringify({
         type: "status",

@@ -1279,9 +1279,27 @@ details.apps .procs {
   border-radius: 10px;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
   border: 1px solid var(--id-green-dark);
+  cursor: pointer;
+  font: inherit;
 }
 .download-fab:hover {
   background: var(--id-green-dark);
+}
+.download-fab:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+.download-fab:disabled {
+  cursor: wait;
+  opacity: 0.75;
+}
+@media (max-width: 520px) {
+  .download-fab {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    width: calc(100% - 24px);
+  }
 }
 .code-field {
   display: flex;
