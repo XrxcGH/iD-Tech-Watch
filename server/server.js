@@ -751,17 +751,17 @@ const server = http.createServer(async (req, res) => {
 
   // Download the packaged agent (built separately via scripts/build-agent-exe.ps1)
   if (urlPath === "/download/id-tech-watch.exe") {
-    const exe = path.join(BASE_DIR, "dist", "iD Tech Watch.exe");
+    const exe = path.join(BASE_DIR, "dist", "iD-Tech-Watch.exe");
     return fs.readFile(exe, (err, data) => {
       if (err) {
         res.writeHead(404, { "content-type": "text/plain" });
         return res.end(
-          "iD Tech Watch.exe has not been built yet. On the hub machine run:\n  powershell -File scripts/build-agent-exe.ps1\nthen this download will work."
+          "iD-Tech-Watch.exe has not been built yet. On the hub machine run:\n  powershell -File scripts/build-agent-exe.ps1\nthen this download will work."
         );
       }
       res.writeHead(200, {
         "content-type": "application/octet-stream",
-        "content-disposition": 'attachment; filename="iD Tech Watch.exe"',
+        "content-disposition": 'attachment; filename="iD-Tech-Watch.exe"',
         "content-length": data.length,
       });
       res.end(data);

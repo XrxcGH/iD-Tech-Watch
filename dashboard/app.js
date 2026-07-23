@@ -1307,11 +1307,11 @@
   function demoDataset() {
     const loc = { id: "d_loc", name: "Demo Campus", buildings: [
       { id: "d_b1", name: "Tresidder", code: "8676", classes: [
-        { id: "d_c1", name: "Roblox Game Dev", instructor: "Ada Lovelace", room: "Rm 101" },
-        { id: "d_c2", name: "Python & AI", instructor: "Alan Turing", room: "Rm 102" },
+        { id: "d_c1", name: "Roblox Game Dev", instructor: "BLEM", room: "Rm 101" },
+        { id: "d_c2", name: "Python & AI", instructor: "Marceline", room: "Rm 102" },
       ] },
-      { id: "d_b2", name: "Huang Engineering", code: "8676", classes: [
-        { id: "d_c3", name: "Minecraft Modding", instructor: "Grace Hopper", room: "Rm 5" },
+      { id: "d_b2", name: "TLH", code: "8676", classes: [
+        { id: "d_c3", name: "Adobe Art & Animation", instructor: "Green", room: "Rm 5" },
       ] },
     ] };
     D.org = [loc];
