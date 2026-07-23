@@ -558,6 +558,9 @@ textarea:focus {
 .dur select {
   width: auto;
 }
+.dur.custom-duration input {
+  width: 88px;
+}
 
 /* --------------------------------------------------------------- device cards */
 .device-grid {

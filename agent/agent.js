@@ -345,6 +345,11 @@ function applyMessageState(message) {
 function showInformationalMessage(params) {
   const text = String((params && params.text) || "").trim().slice(0, 4000);
   if (!text) return;
+  const expiresAt = Number(params && params.expires_at) || 0;
+  if (expiresAt && expiresAt <= Date.now() / 1000) {
+    log("expired informational classroom message ignored");
+    return;
+  }
   if (activeMessage) {
     log("informational message skipped while an enforced classroom message is active");
     return;
@@ -353,7 +358,7 @@ function showInformationalMessage(params) {
   const message = {
     kind: "info",
     text,
-    timeout_sec: Math.max(0, Number(params.timeout_sec) || 0),
+    timeout_sec: expiresAt ? Math.max(0, expiresAt - Date.now() / 1000) : 0,
   };
   spawnMessageWindow(message, false);
   log(`informational classroom message displayed${message.timeout_sec ? ` (${message.timeout_sec}s)` : ""}`);
@@ -495,22 +500,49 @@ function collectDomains(p) {
   return [...new Set(arr.filter(Boolean))];
 }
 
+function blockExpiryFromParams(params, now = Date.now()) {
+  const source = params || {};
+  if (Object.prototype.hasOwnProperty.call(source, "expires_at")) {
+    const expiresAt = source.expires_at;
+    if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt) || expiresAt < 0) return null;
+    if (expiresAt === 0) return 0;
+    const expiry = expiresAt * 1000;
+    return expiry > now ? expiry : null;
+  }
+
+  // Compatibility with older hubs. Current hubs always send expires_at so a
+  // reconnect or delayed delivery cannot restart the original duration.
+  if (!Object.prototype.hasOwnProperty.call(source, "duration_sec")) return 0;
+  const duration = source.duration_sec;
+  if (
+    typeof duration !== "number" ||
+    !Number.isInteger(duration) ||
+    duration <= 0 ||
+    duration > 20 * 60 * 60
+  )
+    return null;
+  return now + duration * 1000;
+}
+
 async function handleCommand(ws, msg) {
   const action = msg.action;
   const p = msg.params || {};
-  const expiry = p.duration_sec ? Date.now() + p.duration_sec * 1000 : 0;
+  const expiry =
+    action === "block_app" || action === "block_site" ? blockExpiryFromParams(p) : 0;
 
   if (action === "kill_process") {
     const killed = await killMatching(p.pattern || "");
     log(`close app '${p.pattern}' -> ${killed.join(", ") || "(none)"}`);
   } else if (action === "block_app") {
+    if (expiry === null) return log("ignored invalid or expired app block");
     const pats = collectPatterns(p);
     for (const pat of pats) appBlocks.set(pat, expiry);
     for (const pat of pats) await killMatching(pat);
-    if (pats.length) log(`blocking apps: ${pats.join(", ")} (${p.duration_sec ? p.duration_sec + "s" : "until lifted"})`);
+    if (pats.length) log(`blocking apps: ${pats.join(", ")} (${expiry ? "timed" : "until lifted"})`);
   } else if (action === "unblock_app") {
     for (const pat of collectPatterns(p)) appBlocks.delete(pat);
   } else if (action === "block_site") {
+    if (expiry === null) return log("ignored invalid or expired website block");
     const doms = collectDomains(p);
     for (const d of doms) siteBlocks.set(d, expiry);
     enforceSites();
@@ -777,4 +809,4 @@ function main() {
 }
 
 if (require.main === module) main();
-else module.exports = { messageKind, messageWindowScript };
+else module.exports = { blockExpiryFromParams, messageKind, messageWindowScript };

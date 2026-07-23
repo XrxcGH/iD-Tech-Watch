@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
-const { messageWindowScript } = require("../agent/agent.js");
+const { blockExpiryFromParams, messageWindowScript } = require("../agent/agent.js");
 
 async function freePort() {
   const server = net.createServer();
@@ -80,6 +80,11 @@ async function closeSocket(ws) {
 }
 
 test("enforced message state is authoritative across clear, reconnect, and timeout", { timeout: 20000 }, async () => {
+  const fixedNow = 2_000_000;
+  assert.equal(blockExpiryFromParams({ expires_at: 2001 }, fixedNow), 2_001_000);
+  assert.equal(blockExpiryFromParams({ expires_at: 2 }, fixedNow), null);
+  assert.equal(blockExpiryFromParams({ expires_at: 0 }, fixedNow), 0);
+
   const hostileText = `</script> ' " ; Stop-Process -Name explorer`;
   const overlayScript = messageWindowScript({
     kind: "warning",
@@ -147,13 +152,28 @@ test("enforced message state is authoritative across clear, reconnect, and timeo
     dashboard.ws.send(JSON.stringify({ type: "auth", token: login.token }));
     await dashboard.inbox.next((message) => message.type === "auth_ok");
 
+    for (const invalidTimeout of [0, -1, 86401, 1.5, "5"]) {
+      dashboard.ws.send(
+        JSON.stringify({
+          type: "command",
+          target: { scope: "device", deviceId: "message-test-device" },
+          action: "message",
+          params: { kind: "warning", text: "Invalid timeout", timeout_sec: invalidTimeout },
+        })
+      );
+      const rejected = await dashboard.inbox.next(
+        (message) => message.type === "error" && message.detail.startsWith("Message timeout")
+      );
+      assert.match(rejected.detail, /whole number/);
+    }
+
     const warningText = `Close your game </script> ' " ; safely`;
     dashboard.ws.send(
       JSON.stringify({
         type: "command",
         target: { scope: "device", deviceId: "message-test-device" },
         action: "message",
-        params: { kind: "warning", text: warningText, timeout_sec: 0 },
+        params: { kind: "warning", text: warningText },
       })
     );
     const warning = await agent.inbox.next(
@@ -228,11 +248,50 @@ test("enforced message state is authoritative across clear, reconnect, and timeo
       })
     );
     const info = await afterClear.inbox.next((message) => message.action === "message");
-    assert.deepEqual(info.params, {
-      kind: "info",
-      text: "Dismissible information",
-      timeout_sec: 5,
-    });
+    assert.equal(info.params.kind, "info");
+    assert.equal(info.params.text, "Dismissible information");
+    assert.ok(info.params.expires_at > Date.now() / 1000);
+    assert.ok(info.params.expires_at <= Date.now() / 1000 + 5);
+
+    dashboard.ws.send(
+      JSON.stringify({
+        type: "command",
+        target: { scope: "device", deviceId: "message-test-device" },
+        action: "block_app",
+        params: { pattern: "steam", duration_sec: 60 },
+      })
+    );
+    const timedBlock = await afterClear.inbox.next((message) => message.action === "block_app");
+    assert.equal(timedBlock.params.pattern, "steam");
+    assert.equal(Object.hasOwn(timedBlock.params, "duration_sec"), false);
+    assert.ok(timedBlock.params.expires_at > Date.now() / 1000 + 59);
+    assert.ok(blockExpiryFromParams(timedBlock.params) > Date.now());
+
+    dashboard.ws.send(
+      JSON.stringify({
+        type: "command",
+        target: { scope: "device", deviceId: "message-test-device" },
+        action: "block_site",
+        params: { domain: "example.com" },
+      })
+    );
+    const manualBlock = await afterClear.inbox.next((message) => message.action === "block_site");
+    assert.equal(manualBlock.params.expires_at, 0);
+
+    for (const invalidDuration of [0, -1, 72001, 1.5, "60"]) {
+      dashboard.ws.send(
+        JSON.stringify({
+          type: "command",
+          target: { scope: "device", deviceId: "message-test-device" },
+          action: "block_app",
+          params: { pattern: "steam", duration_sec: invalidDuration },
+        })
+      );
+      const rejected = await dashboard.inbox.next(
+        (message) => message.type === "error" && message.detail.startsWith("Block duration")
+      );
+      assert.match(rejected.detail, /whole number/);
+    }
 
     dashboard.ws.send(
       JSON.stringify({

@@ -474,14 +474,30 @@ function targetsFor(target) {
 }
 
 const MESSAGE_KINDS = new Set(["info", "warning", "transition"]);
+const MAX_MESSAGE_TIMEOUT_SEC = 24 * 60 * 60;
+const MAX_BLOCK_DURATION_SEC = 20 * 60 * 60;
+
+class CommandValidationError extends Error {}
+
+function optionalPositiveSeconds(source, key, max, label) {
+  if (!Object.prototype.hasOwnProperty.call(source, key)) return null;
+  const value = source[key];
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0 || value > max) {
+    throw new CommandValidationError(`${label} must be a whole number from 1 to ${max} seconds.`);
+  }
+  return value;
+}
+
 function normalizeMessageParams(params) {
   const source = params || {};
   const kind = MESSAGE_KINDS.has(source.kind) ? source.kind : "info";
   const text = String(source.text || "").trim().slice(0, 4000);
-  const requestedTimeout = Number(source.timeout_sec);
-  const timeout_sec = Number.isFinite(requestedTimeout)
-    ? Math.max(0, Math.min(86400, Math.floor(requestedTimeout)))
-    : 0;
+  const timeout_sec = optionalPositiveSeconds(
+    source,
+    "timeout_sec",
+    MAX_MESSAGE_TIMEOUT_SEC,
+    "Message timeout"
+  );
   return { kind, text, timeout_sec };
 }
 
@@ -507,7 +523,7 @@ function sendCommand(target, action, params) {
         id: genId("msg"),
         kind: message.kind,
         text: message.text,
-        expires_at: message.timeout_sec ? Date.now() / 1000 + message.timeout_sec : 0,
+        expires_at: message.timeout_sec === null ? 0 : Date.now() / 1000 + message.timeout_sec,
       };
       let sent = 0;
       for (const deviceId of deviceIds) {
@@ -521,7 +537,15 @@ function sendCommand(target, action, params) {
       return sent;
     }
 
-    const command = { type: "command", action: "message", params: message };
+    const command = {
+      type: "command",
+      action: "message",
+      params: {
+        kind: message.kind,
+        text: message.text,
+        expires_at: message.timeout_sec === null ? 0 : Date.now() / 1000 + message.timeout_sec,
+      },
+    };
     let sent = 0;
     for (const ws of targetsFor(target)) {
       ws.sendJSON(command);
@@ -544,7 +568,22 @@ function sendCommand(target, action, params) {
     return sent;
   }
 
-  const command = { type: "command", action, params: params || {} };
+  let commandParams = params || {};
+  if (action === "block_app" || action === "block_site") {
+    const duration = optionalPositiveSeconds(
+      commandParams,
+      "duration_sec",
+      MAX_BLOCK_DURATION_SEC,
+      "Block duration"
+    );
+    commandParams = {
+      ...commandParams,
+      expires_at: duration === null ? 0 : Date.now() / 1000 + duration,
+    };
+    delete commandParams.duration_sec;
+  }
+
+  const command = { type: "command", action, params: commandParams };
   let sent = 0;
   for (const ws of targetsFor(target)) {
     ws.sendJSON(command);
@@ -763,8 +802,13 @@ function handleDashboard(ws) {
     }
 
     if (msg.type === "command") {
-      const sent = sendCommand(msg.target || {}, msg.action, msg.params);
-      ws.sendJSON({ type: "ack", action: msg.action, sent });
+      try {
+        const sent = sendCommand(msg.target || {}, msg.action, msg.params);
+        ws.sendJSON({ type: "ack", action: msg.action, sent });
+      } catch (error) {
+        if (!(error instanceof CommandValidationError)) throw error;
+        ws.sendJSON({ type: "error", detail: error.message });
+      }
     } else if (msg.type === "org") {
       if (ws.role !== "admin") {
         ws.sendJSON({ type: "error", detail: "admin required" });
@@ -977,7 +1021,14 @@ function checkSchedules() {
     if (s.lastFired === stamp) continue;
     s.lastFired = stamp;
     changed = true;
-    for (const c of s.commands || []) sendCommand(s.target || { scope: "all" }, c.action, c.params);
+    for (const c of s.commands || []) {
+      try {
+        sendCommand(s.target || { scope: "all" }, c.action, c.params);
+      } catch (error) {
+        if (!(error instanceof CommandValidationError)) throw error;
+        console.warn(`[hub] skipped invalid scheduled command in "${s.name}": ${error.message}`);
+      }
+    }
     console.log(`[hub] fired scheduled event "${s.name}" (${(s.commands || []).map((c) => c.action).join(", ")})`);
   }
   if (changed) {

@@ -49,6 +49,8 @@
   const nav = { view: "login", locationId: null, buildingId: null, classId: null };
   const ui = {
     blockDurationSec: 60,
+    blockDurationCustom: false,
+    blockCustomMinutes: "1",
     loginRole: "instructor",
     connected: false,
     monitorMode: "grid",
@@ -64,6 +66,8 @@
   let lastAdminSig = "";
 
   const UNASSIGNED = "__unassigned__";
+  const MAX_MESSAGE_TIMEOUT_SEC = 24 * 60 * 60;
+  const MAX_BLOCK_DURATION_SEC = 20 * 60 * 60;
 
   // Quick-block catalog: each preset blocks matching app process names and/or
   // websites (via the hosts file on the agent). App matches are case-insensitive
@@ -195,17 +199,45 @@
 
   // ---- blocking helpers (dispatch(action, params) sends to the right target) ----
   const robloxPreset = () => BLOCK_PRESETS.find((p) => p.id === "roblox");
+
+  function blockDurationParams() {
+    if (ui.blockDurationCustom) {
+      const raw = ui.blockCustomMinutes.trim();
+      const minutes = /^\d+$/.test(raw) ? Number(raw) : 0;
+      if (!Number.isSafeInteger(minutes) || minutes < 1 || minutes > MAX_BLOCK_DURATION_SEC / 60) {
+        toast("Custom block duration must be a whole number from 1 to 1200 minutes.");
+        const input = document.querySelector(".custom-duration input");
+        if (input) input.focus();
+        return null;
+      }
+      return { duration_sec: minutes * 60 };
+    }
+    if (ui.blockDurationSec === null) return {};
+    if (
+      !Number.isInteger(ui.blockDurationSec) ||
+      ui.blockDurationSec <= 0 ||
+      ui.blockDurationSec > MAX_BLOCK_DURATION_SEC
+    ) {
+      toast("Choose a valid block duration.");
+      return null;
+    }
+    return { duration_sec: ui.blockDurationSec };
+  }
+
   function blockPreset(dispatch, preset) {
-    const dur = ui.blockDurationSec;
-    if (preset.apps && preset.apps.length) dispatch("block_app", { patterns: preset.apps, duration_sec: dur });
-    if (preset.sites && preset.sites.length) dispatch("block_site", { domains: preset.sites, duration_sec: dur });
+    const duration = blockDurationParams();
+    if (duration === null) return;
+    if (preset.apps && preset.apps.length) dispatch("block_app", { patterns: preset.apps, ...duration });
+    if (preset.sites && preset.sites.length) dispatch("block_site", { domains: preset.sites, ...duration });
     toast(`Blocking ${preset.label}.`);
   }
   function blockAllGames(dispatch) {
+    const duration = blockDurationParams();
+    if (duration === null) return;
     const apps = [...new Set(BLOCK_PRESETS.flatMap((p) => p.apps))];
     const sites = [...new Set(BLOCK_PRESETS.flatMap((p) => p.sites))];
-    dispatch("block_app", { patterns: apps, duration_sec: ui.blockDurationSec });
-    dispatch("block_site", { domains: sites, duration_sec: ui.blockDurationSec });
+    dispatch("block_app", { patterns: apps, ...duration });
+    dispatch("block_site", { domains: sites, ...duration });
     toast("Blocking all common games + gaming sites.");
   }
   // A compact "Block…" dropdown usable at class or device scope.
@@ -219,13 +251,16 @@
         if (v === "__all__") return blockAllGames(dispatch);
         if (v === "__app__") {
           const n = prompt("Block which app? (name or part of it, e.g. steam)");
-          if (n && n.trim()) dispatch("block_app", { pattern: n.trim(), duration_sec: ui.blockDurationSec });
+          const duration = blockDurationParams();
+          if (n && n.trim() && duration !== null) dispatch("block_app", { pattern: n.trim(), ...duration });
           return;
         }
         if (v === "__site__") {
           const n = prompt("Block which website? (e.g. poki.com)");
           if (n && n.trim()) {
-            dispatch("block_site", { domain: n.trim(), duration_sec: ui.blockDurationSec });
+            const duration = blockDurationParams();
+            if (duration === null) return;
+            dispatch("block_site", { domain: n.trim(), ...duration });
             if (confirm("Also close open browser tabs now so it shuts immediately?\n(Closes ALL browser windows on the computer.)"))
               dispatch("close_browsers", {});
           }
@@ -901,29 +936,55 @@
       [600, "10 min"],
       [900, "15 min"],
       [1800, "30 min"],
-      [0, "Until lifted"],
+      [null, "Until lifted"],
     ];
-    const inSet = DUR_OPTS.some(([v]) => v === ui.blockDurationSec);
     const durSel = el(
       "select",
       {
         onchange: (e) => {
           if (e.target.value === "custom") {
-            const m = prompt("Block for how many minutes? (0 = until I lift it)", "1");
-            if (m !== null) {
-              const mins = parseInt(m, 10);
-              if (!Number.isNaN(mins) && mins >= 0) ui.blockDurationSec = mins * 60;
-            }
+            ui.blockDurationCustom = true;
+            ui.blockCustomMinutes = "1";
+            ui.blockDurationSec = 60;
             render();
             return;
           }
-          ui.blockDurationSec = parseInt(e.target.value, 10);
+          ui.blockDurationCustom = false;
+          ui.blockDurationSec = e.target.value === "manual" ? null : Number(e.target.value);
+          render();
         },
       },
-      ...DUR_OPTS.map(([v, t]) => el("option", { value: v, selected: v === ui.blockDurationSec }, t)),
-      !inSet ? el("option", { value: ui.blockDurationSec, selected: true }, `${Math.round(ui.blockDurationSec / 60)} min`) : null,
-      el("option", { value: "custom" }, "Custom…")
+      ...DUR_OPTS.map(([v, t]) =>
+        el("option", {
+          value: v === null ? "manual" : v,
+          selected: !ui.blockDurationCustom && v === ui.blockDurationSec,
+        }, t)
+      ),
+      el("option", { value: "custom", selected: ui.blockDurationCustom }, "Custom…")
     );
+    const customDuration = ui.blockDurationCustom
+      ? el(
+          "label",
+          { class: "dur custom-duration" },
+          "Custom",
+          el("input", {
+            type: "number",
+            min: "1",
+            max: String(MAX_BLOCK_DURATION_SEC / 60),
+            step: "1",
+            value: ui.blockCustomMinutes,
+            "aria-label": "Custom block duration in minutes",
+            oninput: (event) => {
+              ui.blockCustomMinutes = event.target.value;
+              const valid = /^\d+$/.test(event.target.value) &&
+                Number(event.target.value) >= 1 &&
+                Number(event.target.value) <= MAX_BLOCK_DURATION_SEC / 60;
+              event.target.setCustomValidity(valid ? "" : "Enter 1 to 1200 whole minutes.");
+            },
+          }),
+          "minutes"
+        )
+      : null;
 
     const classTargets = () => (isUn ? devs.map((d) => ({ scope: "device", deviceId: d.device_id })) : [{ scope: "class", classId: nav.classId }]);
     const runAll = (action, params) => classTargets().forEach((t) => command(t, action, params));
@@ -933,6 +994,7 @@
       { class: "toolbar" },
       el("span", { class: "toolbar-label" }, "Whole class:"),
       el("label", { class: "dur" }, "Block for ", durSel),
+      customDuration,
       el("button", { class: "btn danger", onclick: () => blockPreset(runAll, robloxPreset()) }, "Block Roblox"),
       blockSelect(runAll),
       el("button", { class: "btn", onclick: () => runAll("unblock_all", {}) }, "Unblock all"),
@@ -1096,6 +1158,20 @@
     transition: "Transition time",
   };
 
+  function optionalPositiveInteger(input, max, label) {
+    const raw = input.value.trim();
+    input.setCustomValidity("");
+    if (!raw) return { valid: true, value: null };
+    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw)) || Number(raw) <= 0 || Number(raw) > max) {
+      const detail = `${label} must be a whole number from 1 to ${max}.`;
+      input.setCustomValidity(detail);
+      toast(detail);
+      input.focus();
+      return { valid: false, value: null };
+    }
+    return { valid: true, value: Number(raw) };
+  }
+
   function messageStatus(message) {
     if (!message) return null;
     const label = MESSAGE_KIND_LABELS[message.kind] || "Classroom message";
@@ -1130,10 +1206,11 @@
     });
     const timeout = el("input", {
       type: "number",
-      min: "0",
-      max: "86400",
+      min: "1",
+      max: String(MAX_MESSAGE_TIMEOUT_SEC),
       step: "1",
-      value: "0",
+      value: "",
+      placeholder: "No timeout",
       "aria-label": "Message timeout in seconds",
     });
     const help = el("p", { class: "message-help" });
@@ -1157,8 +1234,11 @@
         text.focus();
         return;
       }
-      const seconds = Math.max(0, Math.min(86400, parseInt(timeout.value, 10) || 0));
-      dispatch("message", { kind: kind.value, text: body, timeout_sec: seconds });
+      const timeoutValue = optionalPositiveInteger(timeout, MAX_MESSAGE_TIMEOUT_SEC, "Message timeout");
+      if (!timeoutValue.valid) return;
+      const params = { kind: kind.value, text: body };
+      if (timeoutValue.value !== null) params.timeout_sec = timeoutValue.value;
+      dispatch("message", params);
       closeOverlay();
       toast(`${MESSAGE_KIND_LABELS[kind.value]} sent to ${targetLabel}.`);
     };
@@ -1178,7 +1258,7 @@
       el(
         "label",
         { class: "field" },
-        el("span", {}, "Timeout in seconds (0 = dismissed or cleared manually)"),
+        el("span", {}, "Timeout in seconds (optional; leave blank for no timeout)"),
         timeout
       ),
       help,
@@ -1358,6 +1438,14 @@
   const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const allApps = () => [...new Set(BLOCK_PRESETS.flatMap((p) => p.apps))];
   const allSites = () => [...new Set(BLOCK_PRESETS.flatMap((p) => p.sites))];
+  const scheduledMessage = (kind, text, timeout) => ({
+    action: "message",
+    params: {
+      kind,
+      text: text || "",
+      ...(timeout === null ? {} : { timeout_sec: timeout }),
+    },
+  });
   const EVENT_TYPES = [
     { id: "pause", label: "Pause computers (full-screen)", build: () => [{ action: "pause", params: { text: "Paused by your instructor — eyes up front." } }] },
     { id: "resume", label: "Resume (end pause)", build: () => [{ action: "resume" }] },
@@ -1365,9 +1453,9 @@
     { id: "block_all", label: "Block all games + sites", build: () => [{ action: "block_app", params: { patterns: allApps() } }, { action: "block_site", params: { domains: allSites() } }] },
     { id: "close_browsers", label: "Close all browsers", build: () => [{ action: "close_browsers" }] },
     { id: "unblock", label: "Unblock everything", build: () => [{ action: "unblock_all" }] },
-    { id: "message_info", label: "Show informational message", build: (text, timeout) => [{ action: "message", params: { kind: "info", text: text || "", timeout_sec: timeout } }] },
-    { id: "message_warning", label: "Show student warning", build: (text, timeout) => [{ action: "message", params: { kind: "warning", text: text || "", timeout_sec: timeout } }] },
-    { id: "message_transition", label: "Show transition-time message", build: (text, timeout) => [{ action: "message", params: { kind: "transition", text: text || "", timeout_sec: timeout } }] },
+    { id: "message_info", label: "Show informational message", build: (text, timeout) => [scheduledMessage("info", text, timeout)] },
+    { id: "message_warning", label: "Show student warning", build: (text, timeout) => [scheduledMessage("warning", text, timeout)] },
+    { id: "message_transition", label: "Show transition-time message", build: (text, timeout) => [scheduledMessage("transition", text, timeout)] },
     { id: "clear_message", label: "Clear enforced message", build: () => [{ action: "clear_message" }] },
   ];
   const ACTION_LABEL = { pause: "Pause", resume: "Resume", block_app: "Block apps", block_site: "Block sites", unblock_all: "Unblock", close_browsers: "Close browsers", message: "Message", clear_message: "Clear message", kill_process: "Close app" };
@@ -1440,14 +1528,30 @@
     const targetSel = el("select", {}, ...classTargetOptions("all"));
     const typeSel = el("select", {}, ...EVENT_TYPES.map((t) => el("option", { value: t.id }, t.label)));
     const msgI = el("input", { placeholder: "Message text (for message events)" });
-    const msgTimeoutI = el("input", { type: "number", min: "0", max: "86400", value: "0", placeholder: "0" });
+    const msgTimeoutI = el("input", {
+      type: "number",
+      min: "1",
+      max: String(MAX_MESSAGE_TIMEOUT_SEC),
+      step: "1",
+      value: "",
+      placeholder: "No timeout",
+    });
     const addBtn = el("button", { class: "btn primary sm", onclick: () => {
       const et = EVENT_TYPES.find((t) => t.id === typeSel.value) || EVENT_TYPES[0];
-      const timeout = Math.max(0, Math.min(86400, parseInt(msgTimeoutI.value, 10) || 0));
+      let timeout = null;
+      if (et.id.startsWith("message_")) {
+        const timeoutValue = optionalPositiveInteger(
+          msgTimeoutI,
+          MAX_MESSAGE_TIMEOUT_SEC,
+          "Message timeout"
+        );
+        if (!timeoutValue.valid) return;
+        timeout = timeoutValue.value;
+      }
       org({ op: "addSchedule", name: nameI.value.trim() || "Event", time: timeI.value || "12:00", days: dayState.slice(), target: targetFromVal(targetSel.value), commands: et.build(msgI.value.trim(), timeout), enabled: true });
       nameI.value = "";
       msgI.value = "";
-      msgTimeoutI.value = "0";
+      msgTimeoutI.value = "";
       dayState.length = 0;
       [...dayBtns.children].forEach((c) => c.classList.remove("active"));
       toast("Scheduled event added.");
@@ -1460,7 +1564,7 @@
         el("div", { class: "sched-row" }, fieldInline("Name", nameI), fieldInline("Time", timeI)),
         el("div", { class: "sched-row" }, fieldInline("Days (none = every day)", dayBtns)),
         el("div", { class: "sched-row" }, fieldInline("Computers", targetSel), fieldInline("Event", typeSel)),
-        el("div", { class: "sched-row" }, fieldInline("Message", msgI), fieldInline("Timeout seconds", msgTimeoutI), addBtn)
+        el("div", { class: "sched-row" }, fieldInline("Message", msgI), fieldInline("Message timeout (seconds, optional)", msgTimeoutI), addBtn)
       )
     );
 
