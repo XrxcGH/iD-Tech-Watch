@@ -62,6 +62,13 @@ function loadConfig() {
     config.layouts ||= {};
     config.schedules ||= [];
     config.auth ||= {};
+    for (const location of config.locations) {
+      location.buildings ||= [];
+      for (const building of location.buildings) {
+        building.classes ||= [];
+        for (const klass of building.classes) klass.blockedApplications ||= [];
+      }
+    }
     let migratedTimeouts = 0;
     for (const schedule of config.schedules) {
       for (const command of schedule.commands || []) {
@@ -328,6 +335,11 @@ const dashboards = new Set(); // authenticated WSConns { role }
 // Enforced warning/transition overlays are authoritative on the hub while it
 // is running. Informational messages remain dismissible one-shot commands.
 const activeMessages = new Map(); // deviceId -> { id, kind, text, expires_at }
+const pendingForegroundCloses = new Map(); // requestId -> { dashboard, deviceId, timer }
+const CLOSE_RESULT_TIMEOUT_MS = Math.max(
+  100,
+  Number(process.env.IDT_CLOSE_RESULT_TIMEOUT_MS) || 5000
+);
 
 function registerAgent(ws, info) {
   const deviceId = String(info.device_id || `unknown-${Date.now()}`);
@@ -343,7 +355,7 @@ function registerAgent(ws, info) {
   if (hint && !config.assignments[deviceId]) {
     let cls = building.classes.find((c) => norm(c.name) === norm(hint));
     if (!cls) {
-      cls = { id: genId("cls"), name: hint, instructor: "", room: "" };
+      cls = { id: genId("cls"), name: hint, instructor: "", room: "", blockedApplications: [] };
       building.classes.push(cls);
     }
     config.assignments[deviceId] = cls.id;
@@ -410,6 +422,11 @@ function orgView() {
         name: c.name,
         instructor: c.instructor || "",
         room: c.room || "",
+        blockedApplications: (c.blockedApplications || []).map((rule) => ({
+          id: rule.id,
+          displayName: rule.displayName,
+          executable: rule.executable,
+        })),
       })),
     })),
   }));
@@ -487,6 +504,136 @@ function targetsFor(target) {
   return deviceIdsFor(target)
     .map((deviceId) => agentWs.get(deviceId))
     .filter(Boolean);
+}
+
+function normalizeExecutableIdentifier(value) {
+  let executable = String(value || "").trim().toLowerCase();
+  if (executable.endsWith(".exe")) executable = executable.slice(0, -4);
+  if (!/^[a-z0-9][a-z0-9._-]{0,79}$/.test(executable)) {
+    throw new CommandValidationError(
+      "Executable must be a process name using only letters, numbers, dots, underscores, or hyphens."
+    );
+  }
+  return executable;
+}
+
+function classRulesForDevice(deviceId) {
+  const rec = devices.get(deviceId);
+  const classId = rec && deviceClassId(deviceId, rec.buildingId);
+  const found = classId && findClass(classId);
+  return found ? found.klass.blockedApplications || [] : [];
+}
+
+function sendClassAppRules(deviceId) {
+  const ws = agentWs.get(deviceId);
+  if (!ws) return false;
+  ws.sendJSON({
+    type: "command",
+    action: "sync_class_app_rules",
+    params: {
+      rules: classRulesForDevice(deviceId).map((rule) => ({
+        id: rule.id,
+        display_name: rule.displayName,
+        executable: rule.executable,
+      })),
+    },
+  });
+  return true;
+}
+
+function syncAllClassAppRules() {
+  for (const deviceId of agentWs.keys()) sendClassAppRules(deviceId);
+}
+
+function applyClassAppRule(message) {
+  const found = findClass(String(message.classId || ""));
+  if (!found) throw new CommandValidationError("Class not found.");
+  const rules = (found.klass.blockedApplications ||= []);
+
+  if (message.op === "add") {
+    const executable = normalizeExecutableIdentifier(message.executable);
+    if (typeof message.displayName !== "string") {
+      throw new CommandValidationError("Application display name is required.");
+    }
+    const displayName = message.displayName.trim();
+    if (!displayName || displayName.length > 100) {
+      throw new CommandValidationError(
+        "Application display name must be between 1 and 100 characters."
+      );
+    }
+    if (rules.some((rule) => rule.executable === executable)) {
+      throw new CommandValidationError("That executable is already blocked for this class.");
+    }
+    rules.push({ id: genId("app"), displayName, executable });
+  } else if (message.op === "remove") {
+    const ruleId = String(message.ruleId || "");
+    const next = rules.filter((rule) => rule.id !== ruleId);
+    if (next.length === rules.length) throw new CommandValidationError("Application rule not found.");
+    found.klass.blockedApplications = next;
+  } else {
+    throw new CommandValidationError("Unsupported application-rule change.");
+  }
+
+  saveConfig();
+  for (const [deviceId, rec] of devices) {
+    if (deviceClassId(deviceId, rec.buildingId) === found.klass.id) sendClassAppRules(deviceId);
+  }
+  console.log(
+    `[hub] class application rules ${message.op === "add" ? "updated" : "removed"} for ${found.klass.id}`
+  );
+}
+
+function completeForegroundClose(requestId, status, detail) {
+  const pending = pendingForegroundCloses.get(requestId);
+  if (!pending) return false;
+  clearTimeout(pending.timer);
+  pendingForegroundCloses.delete(requestId);
+  if (!pending.dashboard.closed) {
+    pending.dashboard.sendJSON({
+      type: "command_result",
+      action: "close_foreground",
+      request_id: requestId,
+      deviceId: pending.deviceId,
+      status,
+      detail: detail || "",
+    });
+  }
+  console.log(
+    `[hub] close focused window ${requestId} for ${pending.deviceId}: ${status}${detail ? ` (${detail})` : ""}`
+  );
+  return true;
+}
+
+function requestForegroundClose(dashboard, target) {
+  if (dashboard.role !== "admin" && dashboard.role !== "instructor") {
+    throw new CommandValidationError("Not authorized to close student windows.");
+  }
+  if (!target || target.scope !== "device" || !target.deviceId) {
+    throw new CommandValidationError("Close focused window requires one selected computer.");
+  }
+  const deviceId = String(target.deviceId);
+  const agent = agentWs.get(deviceId);
+  if (!devices.has(deviceId) || !agent) {
+    dashboard.sendJSON({
+      type: "command_result",
+      action: "close_foreground",
+      deviceId,
+      status: "failed",
+      detail: "Student computer is offline.",
+    });
+    console.log(`[hub] close focused window denied for offline device ${deviceId}`);
+    return 0;
+  }
+
+  const requestId = genId("close");
+  const timer = setTimeout(
+    () => completeForegroundClose(requestId, "timed_out", "The student agent did not respond in time."),
+    CLOSE_RESULT_TIMEOUT_MS
+  );
+  pendingForegroundCloses.set(requestId, { dashboard, deviceId, timer });
+  agent.sendJSON({ type: "command", action: "close_foreground", request_id: requestId, params: {} });
+  console.log(`[hub] ${dashboard.role} requested close focused window on ${deviceId} (${requestId})`);
+  return 1;
 }
 
 const MESSAGE_KINDS = new Set(["info", "warning", "transition"]);
@@ -660,6 +807,7 @@ function applyOrgOp(op) {
           name: op.name || "New Class",
           instructor: op.instructor || "",
           room: op.room || "",
+          blockedApplications: [],
         });
       break;
     }
@@ -772,6 +920,7 @@ function handleAgent(ws) {
       // currently active enforced message or an explicit null that clears a
       // stale local overlay after reconnecting.
       sendMessageState(id);
+      sendClassAppRules(id);
       broadcastState();
       return;
     }
@@ -781,11 +930,24 @@ function handleAgent(ws) {
     } else if (msg.type === "message_state_request") {
       const id = wsDevice.get(ws);
       if (id) sendMessageState(id);
+    } else if (msg.type === "command_result" && msg.action === "close_foreground") {
+      const requestId = String(msg.request_id || "");
+      const pending = pendingForegroundCloses.get(requestId);
+      const deviceId = wsDevice.get(ws);
+      if (!pending || pending.deviceId !== deviceId) return;
+      const allowed = new Set(["success", "no_foreground", "unsupported", "timed_out", "failed"]);
+      const status = allowed.has(msg.status) ? msg.status : "failed";
+      completeForegroundClose(requestId, status, String(msg.detail || "").slice(0, 300));
     }
   };
   ws.onclose = () => {
     if (registered) {
       const id = disconnectAgent(ws);
+      for (const [requestId, pending] of pendingForegroundCloses) {
+        if (pending.deviceId === id) {
+          completeForegroundClose(requestId, "failed", "Student agent disconnected.");
+        }
+      }
       console.log(`[hub] agent offline: ${id}`);
       broadcastState();
     }
@@ -819,8 +981,26 @@ function handleDashboard(ws) {
 
     if (msg.type === "command") {
       try {
-        const sent = sendCommand(msg.target || {}, msg.action, msg.params);
+        if (msg.action === "sync_class_app_rules") {
+          throw new CommandValidationError("That command is reserved for the server.");
+        }
+        const sent =
+          msg.action === "close_foreground"
+            ? requestForegroundClose(ws, msg.target || {})
+            : sendCommand(msg.target || {}, msg.action, msg.params);
         ws.sendJSON({ type: "ack", action: msg.action, sent });
+      } catch (error) {
+        if (!(error instanceof CommandValidationError)) throw error;
+        ws.sendJSON({ type: "error", detail: error.message });
+      }
+    } else if (msg.type === "class_app_rule") {
+      try {
+        if (ws.role !== "admin" && ws.role !== "instructor") {
+          throw new CommandValidationError("Not authorized to change class application rules.");
+        }
+        applyClassAppRule(msg);
+        ws.sendJSON({ type: "ack", action: "class_app_rule", sent: 0 });
+        broadcastState();
       } catch (error) {
         if (!(error instanceof CommandValidationError)) throw error;
         ws.sendJSON({ type: "error", detail: error.message });
@@ -830,14 +1010,24 @@ function handleDashboard(ws) {
         ws.sendJSON({ type: "error", detail: "admin required" });
         return;
       }
-      applyOrgOp(msg);
-      broadcastState();
+      if (applyOrgOp(msg)) {
+        syncAllClassAppRules();
+        broadcastState();
+      }
     } else if (msg.type === "layout") {
       // seating positions — any authenticated instructor/admin may adjust
       if (applyLayoutOp(msg)) broadcastState();
     }
   };
-  ws.onclose = () => dashboards.delete(ws);
+  ws.onclose = () => {
+    dashboards.delete(ws);
+    for (const [requestId, pending] of pendingForegroundCloses) {
+      if (pending.dashboard === ws) {
+        clearTimeout(pending.timer);
+        pendingForegroundCloses.delete(requestId);
+      }
+    }
+  };
 }
 
 // ==========================================================================

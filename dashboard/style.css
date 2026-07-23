@@ -561,6 +561,56 @@ textarea:focus {
 .dur.custom-duration input {
   width: 88px;
 }
+.class-app-rules {
+  margin-bottom: 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+.class-app-rules h3,
+.class-app-rules p {
+  margin: 0 0 8px;
+}
+.class-app-rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 0;
+}
+.class-app-rule {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.class-app-name {
+  font-weight: 700;
+}
+.class-app-rule code {
+  color: var(--muted);
+}
+.class-app-rule-form {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(180px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+.action-result {
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--danger);
+  border-radius: 8px;
+  background: rgba(217, 45, 32, 0.08);
+  font-size: 12px;
+}
+.action-result.success {
+  border-left-color: var(--id-green);
+  background: var(--id-green-soft);
+}
 
 /* --------------------------------------------------------------- device cards */
 .device-grid {
@@ -1037,6 +1087,9 @@ details.apps .procs {
   justify-content: flex-end;
 }
 @media (max-width: 640px) {
+  .class-app-rule-form {
+    grid-template-columns: 1fr;
+  }
   .sheet {
     left: 0;
     right: 0;

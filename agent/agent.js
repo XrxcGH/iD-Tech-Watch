@@ -49,6 +49,7 @@ const HOSTS_END = "# <<< iD Tech Classroom Monitor <<<";
 // pattern/domain -> expiry (ms epoch, 0 = until explicitly unblocked)
 const appBlocks = new Map();
 const siteBlocks = new Map();
+const classAppRules = new Map(); // exact executable -> readable display name
 let sitesAvailable = true; // did the last hosts write succeed?
 let lastAppliedSites = null; // signature of the last hosts write
 let awakeChild = null; // keep-awake helper process
@@ -178,6 +179,95 @@ async function killMatching(pattern) {
     killed.push(pat);
   }
   return killed;
+}
+
+function normalizeExecutableIdentifier(value) {
+  let executable = String(value || "").trim().toLowerCase();
+  if (executable.endsWith(".exe")) executable = executable.slice(0, -4);
+  return /^[a-z0-9][a-z0-9._-]{0,79}$/.test(executable) ? executable : null;
+}
+
+async function killExact(executable) {
+  const exact = normalizeExecutableIdentifier(executable);
+  if (!exact) return [];
+  const killed = [];
+  if (IS_WIN) {
+    const out = await run("powershell", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "$n=$args[0]; $p=Get-Process -Name $n -ErrorAction SilentlyContinue; " +
+        "$p|ForEach-Object{$_.ProcessName}; $p|Stop-Process -Force -ErrorAction SilentlyContinue",
+      exact,
+    ]);
+    for (const line of out.split(/\r?\n/)) {
+      const name = line.trim();
+      if (name) killed.push(name);
+    }
+  } else {
+    await run("pkill", ["-x", exact]);
+    killed.push(exact);
+  }
+  return killed;
+}
+
+function closeForegroundWindowScript() {
+  return [
+    "Add-Type -TypeDefinition @'",
+    "using System;",
+    "using System.Text;",
+    "using System.Runtime.InteropServices;",
+    "public static class IDTechForegroundClose {",
+    '  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
+    '  [DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern int GetWindowTextLength(IntPtr hWnd);',
+    '  [DllImport("user32.dll", CharSet=CharSet.Auto)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);',
+    '  [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);',
+    "}",
+    "'@;",
+    "$h=[IDTechForegroundClose]::GetForegroundWindow();",
+    "if($h -eq [IntPtr]::Zero){'no_foreground';exit};",
+    "$length=[IDTechForegroundClose]::GetWindowTextLength($h);",
+    "if($length -le 0){'no_foreground';exit};",
+    "$title=[Text.StringBuilder]::new($length+1);",
+    "[void][IDTechForegroundClose]::GetWindowText($h,$title,$title.Capacity);",
+    "$result=[IntPtr]::Zero;",
+    "$ok=[IDTechForegroundClose]::SendMessageTimeout($h,0x0010,[IntPtr]::Zero,[IntPtr]::Zero,0x0002,3000,[ref]$result);",
+    "if($ok -eq [IntPtr]::Zero){",
+    "  if([Runtime.InteropServices.Marshal]::GetLastWin32Error() -eq 1460){'timed_out'}else{'failed'}",
+    "}else{'success'}",
+  ].join("\n");
+}
+
+function closeForegroundWindow() {
+  if (!IS_WIN) {
+    return Promise.resolve({
+      status: "unsupported",
+      detail: "Closing the focused window is currently supported only on Windows.",
+    });
+  }
+  return new Promise((resolve) => {
+    execFile(
+      "powershell",
+      ["-NoProfile", "-NonInteractive", "-Command", closeForegroundWindowScript()],
+      { timeout: 5000, windowsHide: true, maxBuffer: 1024 * 1024 },
+      (error, stdout) => {
+        if (error && (error.killed || error.code === "ETIMEDOUT")) {
+          resolve({ status: "timed_out", detail: "The foreground application did not respond." });
+          return;
+        }
+        const status = String(stdout || "").trim().split(/\s+/)[0];
+        if (status === "success") {
+          resolve({ status, detail: "The foreground window received a graceful close request." });
+        } else if (status === "no_foreground") {
+          resolve({ status, detail: "No foreground window was available to close." });
+        } else if (status === "timed_out") {
+          resolve({ status, detail: "The foreground application did not respond." });
+        } else {
+          resolve({ status: "failed", detail: "The foreground window could not be closed." });
+        }
+      }
+    );
+  });
 }
 
 // ------------------------------------------------------- classroom messages
@@ -469,6 +559,10 @@ async function enforce() {
     const killed = await killMatching(pat);
     if (killed.length && IS_WIN) log(`blocked '${pat}' -> killed ${killed.join(", ")}`);
   }
+  for (const executable of classAppRules.keys()) {
+    const killed = await killExact(executable);
+    if (killed.length && IS_WIN) log(`class rule blocked exact executable '${executable}'`);
+  }
   enforceSites();
 }
 
@@ -483,7 +577,21 @@ async function sendStatus(ws) {
     domain,
     expires_at: exp ? exp / 1000 : 0,
   }));
-  ws.send(JSON.stringify({ type: "status", windows, processes, blocked, blockedSites, sitesAvailable }));
+  const classBlockedApplications = [...classAppRules].map(([executable, display_name]) => ({
+    executable,
+    display_name,
+  }));
+  ws.send(
+    JSON.stringify({
+      type: "status",
+      windows,
+      processes,
+      blocked,
+      blockedSites,
+      classBlockedApplications,
+      sitesAvailable,
+    })
+  );
 }
 
 // ------------------------------------------------------------------ commands
@@ -522,6 +630,18 @@ function blockExpiryFromParams(params, now = Date.now()) {
   )
     return null;
   return now + duration * 1000;
+}
+
+function syncClassAppRules(rules) {
+  const next = new Map();
+  for (const rule of Array.isArray(rules) ? rules : []) {
+    const executable = normalizeExecutableIdentifier(rule && rule.executable);
+    const displayName = String((rule && rule.display_name) || "").trim().slice(0, 100);
+    if (executable && displayName) next.set(executable, displayName);
+  }
+  classAppRules.clear();
+  for (const [executable, displayName] of next) classAppRules.set(executable, displayName);
+  log(`synchronized ${classAppRules.size} class application rule(s)`);
 }
 
 async function handleCommand(ws, msg) {
@@ -566,6 +686,27 @@ async function handleCommand(ws, msg) {
     applyMessageState(p.message || null);
   } else if (action === "clear_message") {
     applyMessageState(null);
+  } else if (action === "sync_class_app_rules") {
+    syncClassAppRules(p.rules);
+    await enforce();
+    await sendStatus(ws);
+  } else if (action === "close_foreground") {
+    let result;
+    try {
+      result = await closeForegroundWindow();
+    } catch (error) {
+      result = { status: "failed", detail: error && error.message ? error.message : "Close request failed." };
+    }
+    log(`close focused window ${msg.request_id || "(no id)"}: ${result.status}`);
+    ws.send(
+      JSON.stringify({
+        type: "command_result",
+        action: "close_foreground",
+        request_id: msg.request_id || "",
+        status: result.status,
+        detail: result.detail,
+      })
+    );
   } else if (action === "list_now") {
     await sendStatus(ws);
   } else {
@@ -809,4 +950,11 @@ function main() {
 }
 
 if (require.main === module) main();
-else module.exports = { blockExpiryFromParams, messageKind, messageWindowScript };
+else
+  module.exports = {
+    blockExpiryFromParams,
+    closeForegroundWindowScript,
+    messageKind,
+    messageWindowScript,
+    normalizeExecutableIdentifier,
+  };

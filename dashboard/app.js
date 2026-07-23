@@ -57,6 +57,7 @@
     dragging: null,
     unlocked: {},
     search: {},
+    closeResults: {},
   };
   // /demo runs a self-contained simulated classroom (no hub, no login).
   const DEMO = location.pathname.replace(/\/+$/, "").toLowerCase() === "/demo";
@@ -172,7 +173,32 @@
         }
         onState();
       } else if (msg.type === "ack") {
-        toast(`Command sent to ${msg.sent} computer(s).`);
+        if (msg.action === "class_app_rule") toast("Class application rules updated.");
+        else if (msg.action !== "close_foreground")
+          toast(`Command sent to ${msg.sent} computer(s).`);
+      } else if (msg.type === "command_result" && msg.action === "close_foreground") {
+        const labels = {
+          success: "Focused window close requested successfully.",
+          no_foreground: "No foreground window was available.",
+          unsupported: "Closing the focused window is unsupported on this computer.",
+          timed_out: "The focused window close request timed out.",
+          failed: "The focused window could not be closed.",
+        };
+        const label = labels[msg.status] || labels.failed;
+        ui.closeResults[msg.deviceId] = {
+          status: msg.status || "failed",
+          text: msg.detail || label,
+          at: Date.now(),
+        };
+        toast(msg.detail || label);
+        if (nav.view === "monitor" && !busyEditing()) render();
+        setTimeout(() => {
+          const current = ui.closeResults[msg.deviceId];
+          if (current && Date.now() - current.at >= 14000) {
+            delete ui.closeResults[msg.deviceId];
+            if (nav.view === "monitor" && !busyEditing()) render();
+          }
+        }, 15000);
       } else if (msg.type === "error") {
         toast(msg.detail || "Error");
       }
@@ -907,6 +933,100 @@
   }
 
   // ---- class monitor (the live grid) ----
+  function classApplicationRules(meta) {
+    if (!meta) return null;
+    const rules = meta.c.blockedApplications || [];
+    const displayName = el("input", {
+      type: "text",
+      maxlength: "100",
+      placeholder: "Display name, e.g. Steam",
+      "aria-label": "Application display name",
+    });
+    const executable = el("input", {
+      type: "text",
+      maxlength: "84",
+      placeholder: "Exact process name, e.g. steam.exe",
+      "aria-label": "Exact executable or process name",
+    });
+
+    const add = () => {
+      const name = displayName.value.trim();
+      let processName = executable.value.trim().toLowerCase();
+      if (processName.endsWith(".exe")) processName = processName.slice(0, -4);
+      displayName.setCustomValidity(name ? "" : "Enter a readable application name.");
+      executable.setCustomValidity(
+        /^[a-z0-9][a-z0-9._-]{0,79}$/.test(processName)
+          ? ""
+          : "Use one exact process name with letters, numbers, dots, underscores, or hyphens."
+      );
+      if (!name || !executable.checkValidity()) {
+        toast(name ? executable.validationMessage : "Enter a readable application name.");
+        (name ? executable : displayName).focus();
+        return;
+      }
+      send({
+        type: "class_app_rule",
+        op: "add",
+        classId: meta.c.id,
+        displayName: name,
+        executable: processName,
+      });
+      displayName.value = "";
+      executable.value = "";
+    };
+
+    const list = el("div", { class: "class-app-rule-list" });
+    if (!rules.length) {
+      list.append(el("div", { class: "muted small" }, "No class-specific applications are blocked."));
+    } else {
+      for (const rule of rules) {
+        list.append(
+          el(
+            "div",
+            { class: "class-app-rule" },
+            el("span", { class: "class-app-name" }, rule.displayName),
+            el("code", {}, rule.executable),
+            el("span", { class: "spacer" }),
+            el(
+              "button",
+              {
+                class: "btn ghost sm",
+                onclick: () =>
+                  send({
+                    type: "class_app_rule",
+                    op: "remove",
+                    classId: meta.c.id,
+                    ruleId: rule.id,
+                  }),
+                "aria-label": `Remove ${rule.displayName} block`,
+              },
+              "Remove"
+            )
+          )
+        );
+      }
+    }
+
+    return el(
+      "section",
+      { class: "class-app-rules" },
+      el("h3", {}, "Class application blocking"),
+      el(
+        "p",
+        { class: "muted small" },
+        "These exact executable names are disabled on every computer assigned to this class."
+      ),
+      list,
+      el(
+        "div",
+        { class: "class-app-rule-form" },
+        displayName,
+        executable,
+        el("button", { class: "btn primary sm", onclick: add }, "Add application")
+      )
+    );
+  }
+
   function classMonitor() {
     const isUn = nav.classId === UNASSIGNED;
     const meta = isUn ? null : classById(nav.classId);
@@ -1041,7 +1161,14 @@
       body = grid;
     }
 
-    return el("div", { class: "class-monitor" }, header, toolbar, body);
+    return el(
+      "div",
+      { class: "class-monitor" },
+      header,
+      toolbar,
+      isUn ? null : classApplicationRules(meta),
+      body
+    );
   }
 
   // ---- seating canvas ----
@@ -1279,6 +1406,35 @@
     setTimeout(() => text.focus(), 30);
   }
 
+  function closeForegroundResult(deviceId) {
+    const result = ui.closeResults[deviceId];
+    if (!result || Date.now() - result.at > 15000) return null;
+    return el(
+      "div",
+      { class: `action-result ${result.status}` },
+      el("strong", {}, "Focused window: "),
+      result.text
+    );
+  }
+
+  function requestCloseForeground(device) {
+    if (!device.online) {
+      toast("That student computer is offline.");
+      return;
+    }
+    if (
+      !confirm(
+        `Close the currently focused window on ${device.hostname}?\n\nUnsaved student work in that window may be lost.`
+      )
+    )
+      return;
+    command(
+      { scope: "device", deviceId: device.device_id },
+      "close_foreground",
+      {}
+    );
+  }
+
   function openDevicePanel(d) {
     const t = { scope: "device", deviceId: d.device_id };
     const dispatch = (a, p) => command(t, a, p);
@@ -1301,6 +1457,8 @@
     );
 
     if (d.activeMessage) sheet.append(messageStatus(d.activeMessage));
+    const focusedResult = closeForegroundResult(d.device_id);
+    if (focusedResult) sheet.append(focusedResult);
 
     const left = (exp) => (exp > 0 ? ` (${Math.max(0, Math.round(exp - Date.now() / 1000))}s)` : "");
     if ((d.blocked || []).length || (d.blockedSites || []).length) {
@@ -1322,6 +1480,15 @@
         { class: "sheet-actions" },
         el("button", { class: "btn danger sm", onclick: () => blockPreset(dispatch, robloxPreset()) }, "Block Roblox"),
         blockSelect(dispatch),
+        el(
+          "button",
+          {
+            class: "btn sm",
+            disabled: !d.online,
+            onclick: () => requestCloseForeground(d),
+          },
+          "Close focused window…"
+        ),
         el("button", { class: "btn sm", onclick: () => promptKill(t) }, "Close app…"),
         el("button", { class: "btn sm", onclick: () => command(t, "unblock_all", {}) }, "Unblock all"),
         el("button", { class: "btn sm", onclick: () => command(t, "pause", { text: "Paused by your instructor — eyes up front." }) }, "⏸ Pause"),
@@ -1360,6 +1527,8 @@
     );
 
     if (d.activeMessage) card.append(messageStatus(d.activeMessage));
+    const focusedResult = closeForegroundResult(d.device_id);
+    if (focusedResult) card.append(focusedResult);
 
     const left = (exp) => (exp > 0 ? ` (${Math.max(0, Math.round(exp - Date.now() / 1000))}s)` : "");
     if ((d.blocked && d.blocked.length) || (d.blockedSites && d.blockedSites.length)) {
@@ -1392,6 +1561,15 @@
         { class: "actions" },
         el("button", { class: "btn danger sm", onclick: () => blockPreset(dispatch, robloxPreset()) }, "Block Roblox"),
         blockSelect(dispatch),
+        el(
+          "button",
+          {
+            class: "btn sm",
+            disabled: !d.online,
+            onclick: () => requestCloseForeground(d),
+          },
+          "Close focused window…"
+        ),
         el("button", { class: "btn sm", onclick: () => promptKill(t) }, "Close app…"),
         el("button", { class: "btn sm", onclick: () => command(t, "unblock_all", {}) }, "Unblock all"),
         el("button", { class: "btn sm", onclick: () => command(t, "pause", { text: "Paused by your instructor — eyes up front." }) }, "⏸ Pause"),
@@ -1844,11 +2022,11 @@
   function demoDataset() {
     const loc = { id: "d_loc", name: "Demo Campus", buildings: [
       { id: "d_b1", name: "Tresidder", code: "8676", classes: [
-        { id: "d_c1", name: "Roblox Game Dev", instructor: "BLEM", room: "Rm 101" },
-        { id: "d_c2", name: "Python & AI", instructor: "Marceline", room: "Rm 102" },
+        { id: "d_c1", name: "Roblox Game Dev", instructor: "BLEM", room: "Rm 101", blockedApplications: [] },
+        { id: "d_c2", name: "Python & AI", instructor: "Marceline", room: "Rm 102", blockedApplications: [] },
       ] },
       { id: "d_b2", name: "TLH", code: "8676", classes: [
-        { id: "d_c3", name: "Adobe Art & Animation", instructor: "Green", room: "Rm 5" },
+        { id: "d_c3", name: "Adobe Art & Animation", instructor: "Green", room: "Rm 5", blockedApplications: [] },
       ] },
     ] };
     D.org = [loc];
@@ -1895,6 +2073,23 @@
     }, 4000);
   }
   function demoHandle(obj) {
+    if (obj.type === "class_app_rule") {
+      const meta = classById(obj.classId);
+      if (!meta) return toast("Demo: class not found.");
+      const rules = (meta.c.blockedApplications ||= []);
+      if (obj.op === "add") {
+        rules.push({
+          id: `demo-rule-${Date.now()}`,
+          displayName: obj.displayName,
+          executable: obj.executable,
+        });
+      } else if (obj.op === "remove") {
+        meta.c.blockedApplications = rules.filter((rule) => rule.id !== obj.ruleId);
+      }
+      toast("Demo: class application rules updated.");
+      render();
+      return;
+    }
     if (obj.type === "layout") {
       if (obj.op === "setPosition") (D.layouts[obj.layoutKey] ||= {})[obj.deviceId] = { x: obj.x, y: obj.y };
       else if (obj.op === "resetLayout") {
@@ -1915,7 +2110,13 @@
     );
     const exp = p.duration_sec ? Date.now() / 1000 + p.duration_sec : 0;
     for (const d of affected) {
-      if (obj.action === "block_app") for (const pat of [].concat(p.patterns || [], p.pattern || [])) d.blocked.push({ pattern: String(pat).toLowerCase(), expires_at: exp });
+      if (obj.action === "close_foreground") {
+        ui.closeResults[d.device_id] = {
+          status: "success",
+          text: "Demo: the foreground window received a graceful close request.",
+          at: Date.now(),
+        };
+      } else if (obj.action === "block_app") for (const pat of [].concat(p.patterns || [], p.pattern || [])) d.blocked.push({ pattern: String(pat).toLowerCase(), expires_at: exp });
       else if (obj.action === "block_site") for (const dom of [].concat(p.domains || [], p.domain || [])) d.blockedSites.push({ domain: String(dom).toLowerCase(), expires_at: exp });
       else if (obj.action === "unblock_all") { d.blocked = []; d.blockedSites = []; }
       else if (obj.action === "message" && (p.kind === "warning" || p.kind === "transition")) {
