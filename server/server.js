@@ -111,13 +111,18 @@ function loadConfig() {
     };
   }
 
+  if (!Object.prototype.hasOwnProperty.call(config.auth, "instructorCode")) {
+    config.auth.instructorCode = "flaco";
+    console.log('[hub] instructor password defaulted to "flaco". Change it in Admin settings.');
+  }
+
   // bootstrap admin password if not set (env var, else a loud default)
   if (!config.auth.adminHash) {
-    const initial = process.env.IDT_ADMIN_PASSWORD || "changeme";
+    const initial = process.env.IDT_ADMIN_PASSWORD || "miffy";
     setAdminPassword(initial);
     if (!process.env.IDT_ADMIN_PASSWORD) {
       console.log(
-        '[hub] WARNING: admin password defaulted to "changeme". ' +
+        '[hub] WARNING: admin password defaulted to "miffy". ' +
           "Set IDT_ADMIN_PASSWORD or change it in the admin panel."
       );
     }

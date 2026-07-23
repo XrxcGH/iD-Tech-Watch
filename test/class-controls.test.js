@@ -189,7 +189,7 @@ test("focused-window, inventory, and class rule protocols stay authorized and ex
     const login = await fetch(`${baseUrl}/api/login`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ role: "instructor", code: "" }),
+      body: JSON.stringify({ role: "instructor", code: "flaco" }),
     }).then((response) => response.json());
     assert.equal(login.role, "instructor");
 

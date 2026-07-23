@@ -55,14 +55,28 @@ test("agent download is fixed-path, authenticated, and named safely", async () =
     const unauthenticated = await fetch(`${baseUrl}/download/id-tech-watch.exe`);
     assert.equal(unauthenticated.status, 401);
 
+    const wrongInstructor = await fetch(`${baseUrl}/api/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role: "instructor", code: "wrong" }),
+    });
+    assert.equal(wrongInstructor.status, 401);
+
     const login = await fetch(`${baseUrl}/api/login`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ role: "instructor" }),
+      body: JSON.stringify({ role: "instructor", code: "flaco" }),
     });
     assert.equal(login.status, 200);
     const { token } = await login.json();
     const headers = { authorization: `Bearer ${token}` };
+
+    const adminLogin = await fetch(`${baseUrl}/api/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role: "admin", password: "miffy" }),
+    });
+    assert.equal(adminLogin.status, 200);
 
     const download = await fetch(`${baseUrl}/download/id-tech-watch.exe`, { headers });
     assert.equal(download.status, 200);
