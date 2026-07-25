@@ -35,6 +35,7 @@ const PORT = parseInt(process.env.PORT || "8765", 10);
 const ENROLL_TOKEN = process.env.IDT_ENROLL_TOKEN || ""; // optional agent secret
 const DASHBOARD_DIR = path.join(__dirname, "..", "dashboard");
 const DATA_DIR = path.join(__dirname, "..", "data");
+const DIST_DIR = path.join(__dirname, "..", "dist");
 const CONFIG_PATH = process.env.IDT_CONFIG_PATH || path.join(DATA_DIR, "config.json");
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -51,6 +52,7 @@ let config = {
   assignments: {}, // deviceId -> classId
   layouts: {}, // layoutKey -> { deviceId: {x,y} }  (seating-chart positions, 0..1)
   schedules: [], // [{ id, name, time:"HH:MM", days:[0-6], target, commands:[{action,params}], enabled, lastFired }]
+  deviceNames: {}, // deviceId -> friendly name (e.g. this week's student), overrides hostname
   auth: {}, // { adminHash, adminSalt, instructorCode }
 };
 
@@ -61,16 +63,24 @@ function loadConfig() {
     config.assignments ||= {};
     config.layouts ||= {};
     config.schedules ||= [];
+    config.deviceNames ||= {};
     config.auth ||= {};
+    delete config.auth.instructorCode; // retired: buildings use 4-digit codes now
   } catch (_) {
-    // first run — seed a Stanford location so the UI isn't empty
+    // first run — seed the Stanford beta campus with its buildings
+    const seedBuildings = ["Tresidder", "Grove", "Phi Psi", "French", "Warehaus"].map((n) => ({
+      id: genId("bld"),
+      name: n,
+      aliases: [n.toLowerCase()],
+      code: "8676",
+      classes: [],
+    }));
     config = {
-      locations: [
-        { id: genId("loc"), name: "Stanford", aliases: ["stanford"], buildings: [] },
-      ],
+      locations: [{ id: genId("loc"), name: "Stanford", aliases: ["stanford"], buildings: seedBuildings }],
       assignments: {},
       layouts: {},
       schedules: [],
+      deviceNames: {},
       auth: {},
     };
   }
@@ -348,7 +358,45 @@ function registerAgent(ws, info) {
   agentWs.set(deviceId, ws);
   wsDevice.set(ws, deviceId);
   saveConfig();
+
+  // Re-apply this class's persistent "always block" apps to the (re)connecting device.
+  const cid = deviceClassId(deviceId, buildingId);
+  if (cid) {
+    const fc = findClass(cid);
+    if (fc && fc.klass.blockApps && fc.klass.blockApps.length)
+      ws.sendJSON({ type: "command", action: "block_app", params: { patterns: fc.klass.blockApps } });
+  }
   return deviceId;
+}
+
+// Rename a computer to a friendly name (e.g. this week's student). Persisted by
+// device id, so it survives reconnects; blank clears it back to the hostname.
+function applyRename(deviceId, name) {
+  const id = String(deviceId || "");
+  if (!id) return;
+  const n = String(name || "").trim().slice(0, 40);
+  if (n) config.deviceNames[id] = n;
+  else delete config.deviceNames[id];
+  saveConfig();
+}
+
+// Persistent per-class blocked apps (managed by instructors OR admins).
+function applyClassRule(op) {
+  const f = findClass(op.classId);
+  if (!f) return;
+  f.klass.blockApps = f.klass.blockApps || [];
+  const pat = String(op.pattern || "").toLowerCase().trim();
+  if (!pat) return;
+  if (op.op === "add") {
+    if (!f.klass.blockApps.includes(pat)) {
+      f.klass.blockApps.push(pat);
+      sendCommand({ scope: "class", classId: op.classId }, "block_app", { patterns: [pat] });
+    }
+  } else if (op.op === "remove") {
+    f.klass.blockApps = f.klass.blockApps.filter((x) => x !== pat);
+    sendCommand({ scope: "class", classId: op.classId }, "unblock_app", { pattern: pat });
+  }
+  saveConfig();
 }
 
 function updateDevice(ws, data) {
@@ -391,6 +439,7 @@ function orgView() {
         name: c.name,
         instructor: c.instructor || "",
         room: c.room || "",
+        blockApps: c.blockApps || [],
       })),
     })),
   }));
@@ -402,6 +451,7 @@ function devicesView() {
     out[rec.device_id] = {
       device_id: rec.device_id,
       hostname: rec.hostname,
+      customName: config.deviceNames[rec.device_id] || "",
       os: rec.os,
       locationId: rec.locationId,
       buildingId: rec.buildingId,
@@ -425,7 +475,7 @@ function stateMessage() {
     devices: devicesView(),
     layouts: config.layouts,
     schedules: config.schedules,
-    instructorCodeRequired: !!config.auth.instructorCode,
+    instructorCodeRequired: false, // instructor sign-in is open; buildings use codes
   };
 }
 
@@ -495,6 +545,16 @@ function applyOrgOp(op) {
       if (f && op.name) f.building.name = op.name;
       break;
     }
+    case "moveBuilding": {
+      const f = findBuilding(op.id);
+      if (f) reorder(f.location.buildings, op.id, op.dir);
+      break;
+    }
+    case "moveClass": {
+      const f = findClass(op.id);
+      if (f) reorder(f.building.classes, op.id, op.dir);
+      break;
+    }
     case "setBuildingCode": {
       const f = findBuilding(op.id);
       if (f) f.building.code = String(op.code || "").replace(/\D/g, "").slice(0, 4);
@@ -548,7 +608,8 @@ function applyOrgOp(op) {
         name: op.name || "New event",
         time: op.time || "12:00",
         days: Array.isArray(op.days) ? op.days : [],
-        target: op.target || { scope: "all" },
+        // one or more targets: class / building / location / all
+        targets: Array.isArray(op.targets) && op.targets.length ? op.targets : [op.target || { scope: "all" }],
         commands: Array.isArray(op.commands) ? op.commands : [],
         enabled: op.enabled !== false,
         lastFired: null,
@@ -557,15 +618,12 @@ function applyOrgOp(op) {
     case "updateSchedule": {
       const s = config.schedules.find((x) => x.id === op.id);
       if (s)
-        for (const k of ["name", "time", "days", "target", "commands", "enabled"])
+        for (const k of ["name", "time", "days", "targets", "commands", "enabled"])
           if (k in op) s[k] = op[k];
       break;
     }
     case "deleteSchedule":
       config.schedules = config.schedules.filter((x) => x.id !== op.id);
-      break;
-    case "setInstructorCode":
-      config.auth.instructorCode = (op.code || "").trim();
       break;
     case "setAdminPassword":
       if (op.newPassword) setAdminPassword(op.newPassword);
@@ -580,6 +638,15 @@ function applyOrgOp(op) {
 function unassignClass(classId) {
   for (const [dev, cid] of Object.entries(config.assignments))
     if (cid === classId) delete config.assignments[dev];
+}
+
+// Move an item within an array up (dir<0) or down (dir>0) by one.
+function reorder(arr, id, dir) {
+  const i = arr.findIndex((x) => x.id === id);
+  const j = i + (dir < 0 ? -1 : 1);
+  if (i < 0 || j < 0 || j >= arr.length) return;
+  const [item] = arr.splice(i, 1);
+  arr.splice(j, 0, item);
 }
 
 // Seating-chart positions. Allowed for instructors as well as admins.
@@ -679,6 +746,14 @@ function handleDashboard(ws) {
     } else if (msg.type === "layout") {
       // seating positions — any authenticated instructor/admin may adjust
       if (applyLayoutOp(msg)) broadcastState();
+    } else if (msg.type === "classrule") {
+      // per-class persistent app blocks — instructors manage their own class
+      applyClassRule(msg);
+      broadcastState();
+    } else if (msg.type === "rename") {
+      // rename a computer to the student's name — any authenticated instructor
+      applyRename(msg.deviceId, msg.name);
+      broadcastState();
     }
   };
   ws.onclose = () => dashboards.delete(ws);
@@ -691,6 +766,8 @@ const STATIC_ROUTES = {
   "/": { file: "index.html", type: "text/html; charset=utf-8" },
   "/app.js": { file: "app.js", type: "text/javascript; charset=utf-8" },
   "/style.css": { file: "style.css", type: "text/css; charset=utf-8" },
+  "/fuzzysort.js": { file: "fuzzysort.js", type: "text/javascript; charset=utf-8" },
+  "/hanken.woff2": { file: "hanken.woff2", type: "font/woff2" },
 };
 
 function readJsonBody(req) {
@@ -718,6 +795,7 @@ function sendJson(res, status, obj) {
 }
 
 const server = http.createServer(async (req, res) => {
+ try {
   const urlPath = req.url.split("?")[0];
 
   if (urlPath === "/healthz") {
@@ -731,7 +809,7 @@ const server = http.createServer(async (req, res) => {
 
   if (urlPath === "/api/public" && req.method === "GET") {
     return sendJson(res, 200, {
-      instructorCodeRequired: !!config.auth.instructorCode,
+      instructorCodeRequired: false, // instructor sign-in is open; buildings use codes
     });
   }
 
@@ -743,25 +821,26 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 401, { error: "Incorrect admin password." });
       return sendJson(res, 200, { token: issueToken("admin"), role });
     }
-    // instructor
-    if (config.auth.instructorCode && body.code !== config.auth.instructorCode)
-      return sendJson(res, 401, { error: "Incorrect instructor access code." });
+    // Instructors sign in with no password — access is gated per building by
+    // that building's 4-digit code instead.
     return sendJson(res, 200, { token: issueToken("instructor"), role });
   }
 
   // Download the packaged agent (built separately via scripts/build-agent-exe.ps1)
-  if (urlPath === "/download/id-tech-watch.exe") {
-    const exe = path.join(BASE_DIR, "dist", "iD-Tech-Watch.exe");
-    return fs.readFile(exe, (err, data) => {
+  // The client ships as a zip that runs on the signed node.exe (no AV false
+  // positive). Built via scripts/build-client.ps1.
+  if (urlPath === "/download/id-tech-watch.zip") {
+    const zip = path.join(DIST_DIR, "iD-Tech-Watch.zip");
+    return fs.readFile(zip, (err, data) => {
       if (err) {
         res.writeHead(404, { "content-type": "text/plain" });
         return res.end(
-          "iD-Tech-Watch.exe has not been built yet. On the hub machine run:\n  powershell -File scripts/build-agent-exe.ps1\nthen this download will work."
+          "iD-Tech-Watch.zip has not been built yet. On the hub machine run:\n  powershell -File scripts/build-client.ps1\nthen this download will work."
         );
       }
       res.writeHead(200, {
-        "content-type": "application/octet-stream",
-        "content-disposition": 'attachment; filename="iD-Tech-Watch.exe"',
+        "content-type": "application/zip",
+        "content-disposition": 'attachment; filename="iD-Tech-Watch.zip"',
         "content-length": data.length,
       });
       res.end(data);
@@ -795,6 +874,14 @@ const server = http.createServer(async (req, res) => {
 
   res.writeHead(404, { "content-type": "text/plain" });
   res.end("Not found");
+ } catch (err) {
+  // a bad request must never take the hub down
+  console.error("[hub] request error:", err.message);
+  try {
+    res.writeHead(500, { "content-type": "text/plain" });
+    res.end("Server error");
+  } catch (_) {}
+ }
 });
 
 server.on("upgrade", (req, socket) => {
@@ -864,8 +951,9 @@ function checkSchedules() {
     if (s.lastFired === stamp) continue;
     s.lastFired = stamp;
     changed = true;
-    for (const c of s.commands || []) sendCommand(s.target || { scope: "all" }, c.action, c.params);
-    console.log(`[hub] fired scheduled event "${s.name}" (${(s.commands || []).map((c) => c.action).join(", ")})`);
+    const targets = s.targets && s.targets.length ? s.targets : [s.target || { scope: "all" }];
+    for (const t of targets) for (const c of s.commands || []) sendCommand(t, c.action, c.params);
+    console.log(`[hub] fired scheduled event "${s.name}" -> ${targets.length} target(s) (${(s.commands || []).map((c) => c.action).join(", ")})`);
   }
   if (changed) {
     saveConfig();

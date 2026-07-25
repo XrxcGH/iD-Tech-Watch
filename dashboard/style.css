@@ -1,25 +1,59 @@
-/* iD Tech Classroom Monitor — theme.
- * Brand palette: iD Green (#94D60A) + pure white + pure black text.
- * Green is used as fills (buttons, badges, dots, logo) with black text on top;
- * body text and links are black on white. A darkened brand green (--brand-ink)
- * is used where green text must sit on white and still meet contrast.
- * A functional red (--danger) is kept for destructive actions only. */
-:root {
+/* iD Tech Watch — theme.
+ * Brand: iD Green (#94D60A) as the electric accent, over a warm-neutral light
+ * mode and a deep slate dark mode. Type is Hanken Grotesk (self-hosted). Green
+ * is a fill (buttons/badges/dots) with dark text on it; --brand-ink is the
+ * accessible green for green-on-surface text. --danger is destructive-only. */
+@font-face {
+  font-family: "Hanken Grotesk";
+  src: url("/hanken.woff2") format("woff2");
+  font-weight: 300 800;
+  font-display: swap;
+}
+
+:root,
+:root[data-theme="light"] {
   --id-green: #94d60a;
-  --id-green-dark: #7ab705; /* button hover fill */
-  --brand-ink: #3f6d00; /* accessible green for text/links on white */
+  --id-green-dark: #7ab705;
+  --brand-ink: #3f6d00;
   --id-green-soft: rgba(148, 214, 10, 0.16);
-  --ink: #000000; /* pure black — primary text */
-  --muted: #5f6368;
-  --line: #e5e7e9;
-  --bg: #f4f5f6;
+  --ink: #10130c; /* near-black with a faint warm-green cast */
+  --muted: #5f6a55;
+  --line: #e4e7df;
+  --bg: #f3f5ee; /* warm paper */
+  --bg-2: #eaeee1;
   --card: #ffffff;
   --ok: #3f6d00;
   --ok-dot: #6fbf00;
-  --off: #9aa0a6;
+  --off: #a4a99a;
   --danger: #d92d20;
-  --radius: 12px;
-  --shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 6px 20px rgba(0, 0, 0, 0.06);
+  --radius: 13px;
+  --shadow: 0 1px 2px rgba(16, 20, 10, 0.06), 0 10px 30px rgba(16, 20, 10, 0.07);
+  --glow: 0 0 0 1px rgba(148, 214, 10, 0.35), 0 6px 22px rgba(148, 214, 10, 0.28);
+  --grid-line: rgba(16, 20, 10, 0.06);
+  --topbar: rgba(255, 255, 255, 0.82);
+  --chip-neutral: rgba(16, 20, 10, 0.07);
+}
+
+:root[data-theme="dark"] {
+  --id-green: #a6e61a;
+  --id-green-dark: #b6f23a;
+  --brand-ink: #b6f23a; /* bright green reads well on dark */
+  --id-green-soft: rgba(166, 230, 26, 0.14);
+  --ink: #e9efdd;
+  --muted: #8f9a80;
+  --line: #26302099;
+  --bg: #0e120b; /* deep charcoal-green */
+  --bg-2: #141a0f;
+  --card: #171d12;
+  --ok: #a6e61a;
+  --ok-dot: #a6e61a;
+  --off: #5c6650;
+  --danger: #ff6a5d;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 34px rgba(0, 0, 0, 0.5);
+  --glow: 0 0 0 1px rgba(166, 230, 26, 0.4), 0 6px 26px rgba(166, 230, 26, 0.25);
+  --grid-line: rgba(166, 230, 26, 0.09);
+  --topbar: rgba(20, 26, 15, 0.82);
+  --chip-neutral: rgba(233, 239, 221, 0.1);
 }
 
 * {
@@ -28,10 +62,22 @@
 html,
 body {
   margin: 0;
-  background: var(--bg);
   color: var(--ink);
-  font-family: "Segoe UI", Roboto, system-ui, -apple-system, sans-serif;
+  font-family: "Hanken Grotesk", "Segoe UI", system-ui, sans-serif;
   line-height: 1.45;
+  /* layered atmosphere: soft green auras + a faint grid, not a flat fill */
+  background: var(--bg);
+  background-image:
+    radial-gradient(1100px 520px at 88% -8%, var(--id-green-soft), transparent 60%),
+    radial-gradient(900px 500px at -6% 108%, rgba(148, 214, 10, 0.08), transparent 55%),
+    linear-gradient(var(--bg), var(--bg-2));
+  background-attachment: fixed;
+  min-height: 100vh;
+  letter-spacing: 0.01em;
+}
+h1, h2, h3, .brand-title, .logo {
+  font-family: "Hanken Grotesk", system-ui, sans-serif;
+  letter-spacing: -0.02em;
 }
 h1,
 h2,
@@ -43,13 +89,14 @@ select,
 button {
   font-family: inherit;
   font-size: 14px;
+  color: inherit; /* buttons don't inherit text color by default — make them */
 }
 input,
 select {
   padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #fff;
+  background: var(--card);
   color: var(--ink);
   width: 100%;
 }
@@ -63,7 +110,7 @@ select:focus {
 /* ------------------------------------------------------------------ buttons */
 .btn {
   border: 1px solid var(--line);
-  background: #fff;
+  background: var(--card);
   color: var(--ink);
   padding: 8px 14px;
   border-radius: 8px;
@@ -119,7 +166,10 @@ select:focus {
 .empty {
   color: var(--muted);
   text-align: center;
-  padding: 40px 10px;
+  padding: 44px 10px;
+  grid-column: 1 / -1; /* span the whole grid so it centers, not stuck in col 1 */
+  width: 100%;
+  font-size: 14.5px;
 }
 
 /* -------------------------------------------------------------------- logos */
@@ -197,7 +247,7 @@ select:focus {
   color: var(--muted);
 }
 .login-tab.active {
-  background: #fff;
+  background: var(--card);
   color: var(--brand-ink);
   box-shadow: var(--shadow);
 }
@@ -234,14 +284,16 @@ select:focus {
 .topbar {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 14px;
   padding: 10px 22px;
-  background: #fff;
+  background: var(--topbar);
+  -webkit-backdrop-filter: saturate(1.4) blur(12px);
+  backdrop-filter: saturate(1.4) blur(12px);
   border-bottom: 1px solid var(--line);
   position: sticky;
   top: 0;
   z-index: 20;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  box-shadow: 0 1px 0 var(--line), 0 6px 20px rgba(0, 0, 0, 0.04);
 }
 .brand {
   display: flex;
@@ -292,8 +344,8 @@ select:focus {
   color: var(--brand-ink);
 }
 .role-badge.instructor {
-  background: rgba(0, 0, 0, 0.07);
-  color: #000;
+  background: var(--chip-neutral);
+  color: var(--ink);
 }
 .conn {
   font-size: 12px;
@@ -430,19 +482,26 @@ select:focus {
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 7px;
   flex-wrap: wrap;
   background: var(--card);
   border: 1px solid var(--line);
   border-left: 4px solid var(--id-green);
   border-radius: var(--radius);
-  padding: 12px 14px;
+  padding: 11px 14px;
   margin-bottom: 16px;
   box-shadow: var(--shadow);
 }
+/* compact toolbar buttons so the action row packs onto fewer lines */
+.toolbar .btn,
+.toolbar .block-select {
+  padding: 6px 10px;
+  font-size: 12.5px;
+}
 .toolbar-label {
-  font-weight: 700;
-  color: var(--ink);
+  font-weight: 800;
+  color: var(--brand-ink);
+  margin-right: 2px;
 }
 .dur {
   color: var(--muted);
@@ -524,8 +583,8 @@ select:focus {
   border-radius: 999px;
 }
 .chip.site {
-  background: rgba(0, 0, 0, 0.05);
-  color: #000;
+  background: var(--chip-neutral);
+  color: var(--ink);
   border-color: var(--line);
 }
 .warn {
@@ -543,7 +602,7 @@ select:focus {
   font-weight: 600;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #fff;
+  background: var(--card);
   cursor: pointer;
 }
 .block-select:hover {
@@ -601,7 +660,7 @@ details.apps .procs {
   border-radius: var(--radius);
   padding: 14px;
   margin-bottom: 14px;
-  background: #fbfcfa;
+  background: var(--bg-2);
 }
 .org-loc-head,
 .org-bld-head {
@@ -622,7 +681,7 @@ details.apps .procs {
   border-radius: 10px;
   padding: 12px;
   margin: 10px 0;
-  background: #fff;
+  background: var(--card);
 }
 .cls-table,
 .dev-table {
@@ -655,7 +714,7 @@ details.apps .procs {
   min-width: 90px;
 }
 .add-row td {
-  background: #fbfcfa;
+  background: var(--bg-2);
 }
 .add-inline {
   display: flex;
@@ -678,6 +737,49 @@ details.apps .procs {
   font-size: 11px;
   color: var(--muted);
   margin-left: 17px;
+}
+.dev-rename {
+  width: 160px;
+  font-weight: 600;
+  padding: 4px 8px;
+}
+.target-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.target-scope {
+  max-width: 320px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.target-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.target-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  font-size: 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.target-chip:hover {
+  border-color: var(--id-green);
+}
+.target-chip input {
+  width: auto;
+  accent-color: var(--id-green);
+}
+.target-chip:has(input:checked) {
+  border-color: var(--id-green);
+  background: var(--id-green-soft);
 }
 .status.on {
   color: var(--ok);
@@ -726,7 +828,7 @@ details.apps .procs {
   cursor: pointer;
 }
 .seg-btn.active {
-  background: #fff;
+  background: var(--card);
   color: var(--brand-ink);
   box-shadow: var(--shadow);
 }
@@ -740,10 +842,11 @@ details.apps .procs {
   position: relative;
   width: 100%;
   aspect-ratio: 16 / 10;
-  background-color: #fff;
-  background-image: linear-gradient(rgba(0, 0, 0, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0, 0, 0, 0.04) 1px, transparent 1px);
-  background-size: 5% 8%;
+  background-color: var(--card);
+  /* grid lines match the 16 x 12 snap cells so seats line up with them */
+  background-image: linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 6.25% 8.3333%;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
@@ -755,13 +858,15 @@ details.apps .procs {
   top: 0;
   left: 0;
   right: 0;
+  z-index: 1;
+  pointer-events: none;
   text-align: center;
-  font-size: 12px;
+  font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 0.04em;
   color: var(--brand-ink);
   background: var(--id-green-soft);
-  padding: 5px;
+  padding: 2px;
   text-transform: uppercase;
 }
 .room-empty {
@@ -774,20 +879,22 @@ details.apps .procs {
 .seat {
   position: absolute;
   transform: translate(-50%, -50%);
-  width: 86px;
-  padding: 8px 6px;
+  /* width is set inline to one grid cell; min keeps it usable in small rooms */
+  min-width: 34px;
+  padding: 4px 3px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
-  background: #fff;
+  gap: 1px;
+  background: var(--card);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 8px;
   box-shadow: var(--shadow);
   cursor: grab;
   user-select: none;
   touch-action: none;
   text-align: center;
+  overflow: hidden;
 }
 .seat:hover {
   border-color: var(--id-green);
@@ -816,21 +923,25 @@ details.apps .procs {
   background: var(--off);
 }
 .seat-screen {
-  font-size: 22px;
+  font-size: 17px;
   line-height: 1;
 }
 .seat-name {
-  font-size: 11px;
+  font-size: 9.5px;
   font-weight: 600;
-  max-width: 78px;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .seat-badge {
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
   color: var(--danger);
+}
+.seat-dot {
+  top: 4px;
+  right: 4px;
 }
 
 /* ------------------------------------------------------- device control sheet */
@@ -855,7 +966,7 @@ details.apps .procs {
   width: min(440px, 92vw);
   max-height: 86vh;
   overflow: auto;
-  background: #fff;
+  background: var(--card);
   border-radius: 16px;
   box-shadow: 0 10px 40px rgba(0, 0, 0, 0.35);
   padding: 16px;
@@ -918,7 +1029,7 @@ details.apps .procs {
   border-bottom: 1px solid var(--line);
 }
 .sched-form {
-  background: #fbfcfa;
+  background: var(--bg-2);
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 12px;
@@ -939,13 +1050,18 @@ details.apps .procs {
   font-size: 12px;
   color: var(--muted);
   font-weight: 600;
+  flex: 1 1 220px; /* grow to fill the row so placeholders aren't cut off */
 }
 .field-inline > span {
-  font-size: 11.5px;
+  font-size: 12px;
 }
 .field-inline input,
 .field-inline select {
-  min-width: 180px;
+  width: 100%;
+  min-width: 200px;
+}
+.field-inline .day-toggle {
+  flex: none;
 }
 .day-toggle {
   display: flex;
@@ -955,7 +1071,7 @@ details.apps .procs {
   width: 30px;
   height: 30px;
   border: 1px solid var(--line);
-  background: #fff;
+  background: var(--card);
   border-radius: 7px;
   cursor: pointer;
   font-weight: 700;
@@ -965,6 +1081,136 @@ details.apps .procs {
   background: var(--id-green);
   border-color: var(--id-green);
   color: #000;
+}
+
+.reorder,
+.row-actions {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.reorder .btn,
+.row-actions .btn {
+  padding: 3px 7px;
+  line-height: 1;
+}
+.sort-select {
+  width: auto;
+}
+.picker-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+.nav-search {
+  width: 230px;
+  max-width: 52vw;
+}
+/* fuzzy search de-emphasises non-matches but keeps them clickable (both themes) */
+.tile.dim {
+  opacity: 0.5;
+  filter: grayscale(0.85);
+}
+.tile.dim:hover {
+  opacity: 1;
+  filter: none;
+}
+:root[data-theme="dark"] .tile.dim {
+  opacity: 0.42; /* dark cards need a touch more fade to read as "de-emphasised" */
+}
+.tile.kbd {
+  border-color: var(--id-green);
+  box-shadow: 0 0 0 2px var(--id-green-soft), 0 6px 16px rgba(148, 214, 10, 0.3);
+}
+
+/* shared type polish — same bold, designed feel in light and dark */
+.brand-title,
+.tile-title,
+.page-title,
+.panel-head h2,
+.class-header h2,
+.sheet-title {
+  font-weight: 800;
+}
+.page-title {
+  letter-spacing: -0.02em;
+}
+.list-title,
+.field-inline > span,
+.field span {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ------------------------------------------------------- class rules + combobox */
+.rules-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--danger);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  box-shadow: var(--shadow);
+}
+.rule-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.chip.rule {
+  background: rgba(217, 45, 32, 0.1);
+  color: var(--danger);
+  border: 1px solid rgba(217, 45, 32, 0.3);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.chip-x {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+  line-height: 1;
+}
+.combo {
+  position: relative;
+  flex: 1;
+  min-width: 220px;
+}
+.combo-input {
+  width: 100%;
+}
+.combo-menu {
+  display: none;
+  position: absolute;
+  z-index: 30;
+  left: 0;
+  right: 0;
+  top: calc(100% + 3px);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  max-height: 220px;
+  overflow: auto;
+}
+.combo-opt {
+  padding: 7px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.combo-opt.active,
+.combo-opt:hover {
+  background: var(--id-green-soft);
 }
 
 /* ------------------------------------------------- demo / download / code gate */
@@ -1071,3 +1317,92 @@ details.apps .procs {
     display: none;
   }
 }
+
+/* ------------------------------------------------ theme toggle + duration + motion */
+.theme-toggle {
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
+}
+.theme-toggle:hover {
+  border-color: var(--id-green);
+  box-shadow: var(--glow);
+  transform: rotate(-18deg);
+}
+.dur {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.dur-select {
+  width: auto;
+  font-weight: 700;
+  color: var(--brand-ink);
+  border-color: var(--id-green-soft);
+}
+
+/* accent all form controls with the brand green */
+input,
+select {
+  accent-color: var(--id-green);
+}
+
+/* electric primary buttons + green focus glow */
+.btn.primary:hover,
+.btn.danger:hover {
+  box-shadow: var(--glow);
+}
+.logo {
+  background: linear-gradient(135deg, var(--id-green), #c6f24d);
+  box-shadow: 0 2px 10px rgba(148, 214, 10, 0.4);
+}
+
+/* one orchestrated page-load reveal (respects reduced-motion) */
+@keyframes riseIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+/* animations only on the `.enter` (navigation) paint — never on live refreshes */
+.content.enter > * {
+  animation: riseIn 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.content.enter .tiles > .tile,
+.content.enter .device-grid > .card {
+  animation: riseIn 0.45s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.content.enter .tiles > .tile:nth-child(2),
+.content.enter .device-grid > .card:nth-child(2) { animation-delay: 0.04s; }
+.content.enter .tiles > .tile:nth-child(3),
+.content.enter .device-grid > .card:nth-child(3) { animation-delay: 0.08s; }
+.content.enter .tiles > .tile:nth-child(4),
+.content.enter .device-grid > .card:nth-child(4) { animation-delay: 0.12s; }
+.content.enter .tiles > .tile:nth-child(5),
+.content.enter .device-grid > .card:nth-child(5) { animation-delay: 0.16s; }
+.content.enter .tiles > .tile:nth-child(n+6),
+.content.enter .device-grid > .card:nth-child(n+6) { animation-delay: 0.2s; }
+.login-inner { animation: riseIn 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; }
+}
+
+/* dark-mode readability tweaks */
+:root[data-theme="dark"] .warn { background: rgba(255, 200, 90, 0.1); color: #ffcf7a; border-color: rgba(255, 200, 90, 0.28); }
+:root[data-theme="dark"] .os,
+:root[data-theme="dark"] .pill { background: rgba(255, 255, 255, 0.05); }
+:root[data-theme="dark"] .list { background: rgba(0, 0, 0, 0.22); }
+:root[data-theme="dark"] .seat { background: #1c2416; }
+:root[data-theme="dark"] input,
+:root[data-theme="dark"] select { background: #10150c; color: var(--ink); border-color: var(--line); }

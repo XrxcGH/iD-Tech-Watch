@@ -1,16 +1,20 @@
-# iD Tech Classroom Monitor
+# iD Tech Watch
 
 A classroom-management system for iD Tech Camps. Instructors watch the open
-windows on every laptop in their class, close unauthorized apps, and temporarily
-block games and gaming websites (Roblox, Minecraft, Steam, poki.com, …). Admins
-manage the whole org — **Location → Building → Class → Computer** — from a web
-panel, with everything editable week to week.
+windows on every laptop in their class, close unauthorized apps, temporarily
+block games and gaming websites (Roblox, Minecraft, Steam, poki.com, …), pause
+screens, rename computers to the week's students, and schedule daily events.
+Admins manage the whole org — **Location → Building → Class → Computer** — from a
+web panel, with everything editable week to week.
 
-Beta target: **Stanford campus** (single hub on the classroom LAN). The Location
+Beta target: **Stanford campus** (single hub on the classroom LAN), seeded with
+the **Tresidder, Grove, Phi Psi, French, and Warehaus** buildings. The Location
 tier is the worldwide-scaling axis: add "MIT", "London", etc. when you expand.
 
-**Runtime: Node.js 18+ (uses the built-in global WebSocket client, stable in
-Node 22+). Zero external dependencies — nothing to `npm install`.**
+**Hub + dashboard runtime: Node.js 18+ (Node 22+ recommended). The dashboard
+vendors one small library (`fuzzysort`); the hub itself has no other deps. The
+packaged client (`iD-Tech-Watch.zip`) bundles the signed `node.exe` — target
+laptops need nothing installed.**
 
 ---
 
@@ -46,7 +50,7 @@ Built-in presets:
 
 | Preset            | Blocks (apps)                | Blocks (websites)                              |
 |-------------------|------------------------------|------------------------------------------------|
-| Roblox            | `roblox*`                    | roblox.com                                     |
+| Roblox            | `*roblox*`                   | roblox.com                                     |
 | Minecraft         | `*minecraft*`                | minecraft.net                                  |
 | Fortnite          | `*fortnite*`                 | —                                              |
 | Steam             | `*steam*`                    | steampowered.com, steamcommunity.com           |
@@ -60,6 +64,43 @@ website…** (any domain, e.g. `twitch.tv`). Also **Close app…** (kill once) a
 
 **Block websites** works by editing the laptop's hosts file, so it needs the agent
 to run **as Administrator** (see below). App blocking does not need elevation.
+
+**Close tabs / close a site now** — a hosts block only stops *new* page loads, so
+there's a **Close tabs** button (and a "Close all browsers" item in the Block menu)
+that closes every browser window immediately, clearing an already-open site.
+
+**Always block for this class** — under the class toolbar, add apps that should
+stay blocked for that class permanently (persists across restarts, re-applied when
+a laptop reconnects). The add box **autocompletes from the apps currently open**
+across the class (type or pick; Tab fills the top match and adds it; unknown names
+are allowed too).
+
+**Pause / full-screen warning** — **⏸ Pause** covers every screen with a
+full-screen "eyes up front" overlay that **reopens if a student closes it**, until
+you press **▶ Resume**. **⚠ Full-screen…** does the same with your own message (good
+for transitions). **Message…** pops a dismissible note with an optional
+**auto-close timeout**.
+
+**Scheduled events** — in the Admin panel, schedule daily timed actions (e.g.
+"Pause all computers at 12:00", "Block all games at 1:00, unblock at 1:30") by
+location / building / class / everyone, on chosen days.
+
+**Find things fast** — every picker (location → building → class) has a
+right-aligned **fuzzy search** (powered by `fuzzysort`): matches float to the front,
+non-matches dim but stay clickable, arrow keys / mouse navigate, and **Tab** jumps
+straight into the top match.
+
+**Try it with fake computers** — visit **`/demo`** (or the **Demo** button, top
+right) for a simulated classroom with fake laptops to learn the flow. Nothing real
+is touched.
+
+**Bookmark your class** — once you're in a class the URL becomes
+`/{Location}/{Instructor}` (e.g. `/Stanford/Ada%20Lovelace`), so you can bookmark it
+and jump straight back in.
+
+**Per-building instructor code** — buildings are gated by a 4-digit code (default
+**8676**) that auto-submits when entered; admins set each building's code in the
+panel.
 
 > Notes / limits: "minecraft" matches the launcher + Bedrock edition; Minecraft
 > **Java** runs as `javaw.exe`, which is intentionally *not* matched so we don't
@@ -87,16 +128,34 @@ Location (Stanford)
   the week's class in the admin panel.
 - **Locations & buildings** auto-populate as agents check in, and are editable.
 
-## Roles
+## Roles & access
 
-| Role       | Signs in with          | Can do                                                                 |
-|------------|------------------------|------------------------------------------------------------------------|
-| Instructor | (optional access code) | Drill down Location → Building → Class and control that class's computers |
-| Admin      | admin password         | Everything an instructor can, plus manage the org, classes, instructors, computer assignments, and settings |
+| Role       | Signs in with     | Can do                                                                 |
+|------------|-------------------|------------------------------------------------------------------------|
+| Instructor | nothing (open)    | Drill down Location → Building → Class and control that class's computers |
+| Admin      | admin password    | Everything an instructor can, plus manage the org, classes, instructors, computer assignments, scheduled events, and settings |
 
-The initial admin password comes from `IDT_ADMIN_PASSWORD` (or defaults to
-`changeme` with a warning). Change it in **Admin → Settings**. Only a salted
-scrypt hash is stored, in `data/config.json`.
+- **Instructors sign in with no password.** Access is gated **per building** by a
+  **4-digit code** (default **8676**) that auto-submits when typed. Admins set each
+  building's code in the Organization panel.
+- The initial **admin password** comes from `IDT_ADMIN_PASSWORD` (or defaults to
+  `changeme` with a warning). Change it in **Admin → Settings**. Only a salted
+  scrypt hash is stored, in `data/config.json`.
+
+## Other instructor tools
+
+- **Rename computers** to the week's student (✎ Rename on a card / seat / admin
+  table). The name persists by device and survives reconnects; blank resets it to
+  the hostname.
+- **Seating chart** (🪑 Seating): drag computers onto a 16×12 room grid; positions
+  snap to the grid and save per class. Tap one to control it.
+- **Bookmarkable URLs**: the address bar tracks where you are — `/`, `/admin`
+  (login-gated), `/Stanford`, `/Stanford/Tresidder`, `/Stanford/Tresidder/{Class}`.
+- **Fuzzy search** (right of each picker) jumps to a location/building/class; Tab
+  picks the top match.
+- **Scheduled events** (Admin) run daily at a set time and can target **any mix of
+  classes, whole buildings, and whole campuses** at once (e.g. one "Lunch pause"
+  for Grove + Phi Psi + French + Warehaus, a different one for Tresidder).
 
 ---
 
@@ -226,24 +285,158 @@ hub, and pass `--token <same value>` to each agent.
 token) · `status` (windows, processes, blocked, blockedSites, sitesAvailable).
 
 **Hub → Agent:** `command` with `action` ∈ `kill_process | block_app | unblock_app |
-block_site | unblock_site | unblock_all | message | list_now`. `block_app` accepts
-`pattern` or `patterns[]`; `block_site` accepts `domain` or `domains[]`; both accept
-`duration_sec` (omit/0 = until lifted).
+block_site | unblock_site | unblock_all | close_browsers | pause | resume | message |
+list_now`. `block_app` accepts `pattern` or `patterns[]`; `block_site` accepts
+`domain` or `domains[]`; both accept `duration_sec` (omit/0 = until lifted).
+`message` accepts `timeout_sec`; `pause` accepts `text`.
 
 **Dashboard ↔ Hub:** REST `POST /api/login` → session token; WS `/ws/dashboard`
-first sends `{type:"auth",token}`, then receives `{type:"state", org, devices}` and
-sends `command` (any role) / `org` mutations (admin only). Command targets:
-`{scope}` ∈ `device | class | building | location | all`.
+first sends `{type:"auth",token}`, then receives
+`{type:"state", org, devices, layouts, schedules}`. Any authenticated role may
+send `command`, `layout` (seat position), `classrule` (per-class always-block
+apps), and `rename` (device → student name). `org` mutations (locations,
+buildings, building codes, classes, class reorder, assignments, schedules,
+admin password) require the **admin** role. Command / schedule targets: `{scope}`
+∈ `device | class | building | location | all`; a schedule carries a `targets[]`
+array so one event can hit several buildings/campuses at once.
 
 ---
+
+## Packaged client — `iD-Tech-Watch.zip`
+
+The client ships as a **zip that runs on the official, Microsoft-signed
+`node.exe`** — *not* a `pkg`-packed `.exe`. This matters: packed single-file exes
+trip Windows Defender's ML heuristic (a false `Trojan:Win32/Wacatac.B!ml`-style
+flag), while a signed `node.exe` plus plain `.js` scripts does not. The laptop
+still needs nothing installed — Node is inside the zip.
+
+```bash
+powershell -File scripts/build-client.ps1     # produces dist/iD-Tech-Watch.zip
+```
+
+Downloadable from the site: the **⬇ iD-Tech-Watch.zip** button (bottom-right,
+after login) hits `/download/id-tech-watch.zip`. The zip contains `node.exe`,
+`watch.js`, `agent.js`, a `watch-config.json` template, and
+**Start / Stop iD Tech Watch.cmd**.
+
+To deploy: unzip onto the laptop (or a USB) and double-click **Start iD Tech
+Watch.cmd**. It (transparently) sets up a self-healing pair of processes:
+- ensures `C:\Users\Student\projects\iD-Tech\` exists (creates it if missing);
+- installs the scripts **and the signed `node.exe`** there (self-contained after
+  the USB is removed) — the **client** and a **re-opener (guardian)**;
+- each watches the other and **relaunches it if it's closed**; the client runs the
+  monitoring agent (with keep-awake);
+- **first run** pops a small window to enter the hub server / location / building
+  (or pre-fill `watch-config.json` before handing out the folder);
+- **to stop both:** run **Stop iD Tech Watch.cmd** (it drops a `stop.flag` that
+  both processes watch for — no keyboard hook, which antivirus dislikes).
+
+It is not hidden from Task Manager — deliberately transparent for a supervised lab.
+
+### Antivirus & SmartScreen
+
+- The zip runs on **signed `node.exe`**, so it avoids the packed-binary "virus
+  detected" flag a `pkg` `.exe` gets. If you ever rebuild a `pkg` exe and Defender
+  flags it, that's a **false positive** from the packer — not the code.
+- On **camp-managed laptops** (the beta), add an **AV/Intune allow-list** entry for
+  the install folder (`C:\Users\Student\projects\iD-Tech\`) or the file hash. This
+  is the standard way to ship an internal tool and needs no certificate.
+- For **open public download**, buy an **EV code-signing certificate** and sign the
+  build — the only thing that fully clears the SmartScreen "unknown publisher"
+  prompt for everyone.
+- Either way you can **submit the file to Microsoft** (microsoft.com/wdsi/filesubmission)
+  as a false positive; they usually clear it within a day.
+- Runtime note: website blocking edits the hosts file, which Defender's *Controlled
+  Folder Access* can block — allow the client through it (or leave CFA off on lab
+  machines) if site blocks don't take effect.
+
+---
+
+## Deployment
+
+### Option 1 — Run it in one classroom/building on an admin laptop (LAN)
+
+The admin laptop runs the hub; every student laptop's agent connects to it over
+the same Wi-Fi/wired network. Nothing leaves the local network.
+
+1. **On the admin laptop**, install Node.js 18+ (22+ recommended) and copy this
+   folder onto it.
+2. **Find the laptop's LAN IP.** `ipconfig` (Windows) → the IPv4 like
+   `10.0.0.42`. The hub also prints it on startup.
+3. **Start the hub** with a real admin password and keep-awake so the laptop
+   doesn't sleep:
+   ```powershell
+   $env:IDT_ADMIN_PASSWORD = "your-strong-password"
+   $env:IDT_KEEP_AWAKE = "1"
+   node server/server.js
+   ```
+   Leave this window open (or use `scripts/run_server.ps1`). When Windows Firewall
+   prompts, **Allow** Node on **Private** networks.
+4. **Open the console** on the admin laptop at `http://localhost:8765/` and sign
+   in as **Admin**. Set each building's 4-digit code, add classes, etc.
+5. **On each student laptop** (same network): unzip **`iD-Tech-Watch.zip`** and
+   double-click **Start iD Tech Watch.cmd** (nothing to install — Node is in the
+   zip). Enter the hub server (`ws://10.0.0.42:8765`), location, and building in the
+   first-run window. Advanced: `scripts\run_agent.ps1 -Server ws://10.0.0.42:8765
+   -Location "Stanford" -Building "Tresidder"` if the laptop already has Node.
+6. Instructors browse to `http://10.0.0.42:8765/` from any device on the network,
+   pick their building (enter its code), and go.
+
+Notes: all machines must be on the **same LAN/subnet** (guest Wi-Fi that isolates
+clients won't work). This is plain `ws://` and is only safe on a trusted network.
+For a whole building with several rooms, one hub laptop is plenty.
+
+### Option 2 — Host it as a public website (one hub for everyone)
+
+Run the hub once on a small cloud server with a domain and TLS; agents and
+instructors connect over the internet — no per-machine hub, no LAN requirement.
+
+1. **Get a server + domain.** Any small Linux VM (e.g. 1 vCPU / 1 GB: DigitalOcean,
+   Lightsail, Fly.io, Azure) and a domain like `watch.idtech.com` pointed (A
+   record) at the VM's IP.
+2. **Install Node 18+** on the VM and copy this project there.
+3. **Run the hub as a service** so it restarts on reboot/crash. With systemd
+   (`/etc/systemd/system/idtech.service`):
+   ```ini
+   [Service]
+   Environment=IDT_ADMIN_PASSWORD=your-strong-password
+   Environment=PORT=8765
+   WorkingDirectory=/opt/id-tech-watch
+   ExecStart=/usr/bin/node server/server.js
+   Restart=always
+   [Install]
+   WantedBy=multi-user.target
+   ```
+   `sudo systemctl enable --now idtech`.
+4. **Put it behind TLS** (required over the internet — enables `https://` +
+   `wss://`). Easiest is **Caddy**, which auto-provisions a certificate:
+   ```
+   watch.idtech.com {
+       reverse_proxy 127.0.0.1:8765
+   }
+   ```
+   `caddy run`. (nginx with certbot works too — proxy `/` and upgrade
+   `/ws/agent` + `/ws/dashboard` to WebSocket.)
+5. **Require an enrollment token** so only your agents can join. Add
+   `Environment=IDT_ENROLL_TOKEN=some-secret` to the service and pass
+   `--token some-secret` (or put it in `watch-config.json`) on each agent.
+6. **Point clients at the domain:** agents use `--server wss://watch.idtech.com`
+   (note `wss`), and everyone opens `https://watch.idtech.com/`. Build the zip once
+   with that server baked into its `watch-config.json` and hand it out; the site's
+   **⬇ iD-Tech-Watch.zip** button serves it.
+
+Before a real public rollout, also do the "next" items below (a proper database,
+per-instructor accounts, per-device certificates). The current build stores state
+in a JSON file and uses one shared admin password + per-building codes — fine for
+a controlled beta, light for open public use.
 
 ## Scaling worldwide (structure in place; most dormant for beta)
 
 - **Location tier — done.** Model + UI support many campuses; beta uses one.
 - **Persistence — done (beta grade).** JSON at `data/config.json`. `// TODO(scale)`
   marks where Postgres/Redis would go for many hubs.
-- **Auth — done (beta grade).** Admin password (scrypt) + optional instructor code
-  + session tokens. Next: per-instructor SSO accounts and per-device certs.
+- **Auth — done (beta grade).** Admin password (scrypt) + per-building 4-digit
+  codes + session tokens. Next: per-instructor SSO accounts and per-device certs.
 - **Transport security — next.** Put the hub behind Caddy/nginx for TLS + `wss://`.
   Never run plain `ws://` outside a trusted LAN.
 - **Regional hubs — next.** One hub per region (or a cloud relay keyed by location).
@@ -262,15 +455,18 @@ iD-Tech-Monitoring-App/
 ├── server/
 │   └── server.js       # hub: WebSocket router, auth, org model, persistence (0 deps)
 ├── agent/
-│   └── agent.js        # student-laptop agent: monitor, block apps + websites, keep-awake (0 deps)
+│   ├── agent.js        # student-laptop agent: monitor, block apps/sites, pause, keep-awake (0 deps)
+│   └── watch.js        # "iD Tech Watch" launcher/watchdog: two mutually-watching processes
 ├── dashboard/
 │   ├── index.html
 │   ├── app.js          # SPA: login / instructor drill-down + seating canvas / admin panel
-│   └── style.css       # iD Green theme (brand colors are CSS variables)
+│   ├── style.css       # iD Green theme (brand colors are CSS variables)
+│   └── fuzzysort.js    # vendored search library (served locally, no CDN)
 ├── scripts/
-│   ├── run_server.ps1            # start the hub
-│   ├── run_agent.ps1            # run an agent (self-elevates + keep-awake)
-│   └── install-agent-startup.ps1 # auto-start the agent at logon (Scheduled Task)
+│   ├── run_server.ps1             # start the hub
+│   ├── run_agent.ps1             # run an agent (self-elevates + keep-awake)
+│   ├── install-agent-startup.ps1 # auto-start the agent at logon (Scheduled Task)
+│   └── build-client.ps1          # build dist/iD-Tech-Watch.zip (signed node.exe + scripts)
 └── data/               # created at runtime: config.json (git-ignored)
 ```
 
