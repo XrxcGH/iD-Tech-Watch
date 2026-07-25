@@ -11,5 +11,7 @@
     "start": "node server/server.js",
     "server": "node server/server.js"
   },
-  "dependencies": {}
+  "dependencies": {
+    "ws": "^8.21.1"
+  }
 }

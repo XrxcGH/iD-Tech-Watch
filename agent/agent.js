@@ -30,6 +30,20 @@ const fs = require("fs");
 const path = require("path");
 const { execFile, spawn } = require("child_process");
 
+// Prefer Node's built-in global WebSocket (Node 22+). Fall back to the `ws`
+// package when packaged into an exe on an older embedded Node (bundled at build
+// time; not needed for plain `node agent.js` on a modern Node).
+const WS =
+  typeof WebSocket !== "undefined"
+    ? WebSocket
+    : (() => {
+        try {
+          return require("ws");
+        } catch (_) {
+          return null;
+        }
+      })();
+
 const IS_WIN = process.platform === "win32";
 const IS_MAC = process.platform === "darwin";
 
@@ -106,13 +120,14 @@ async function inspect() {
   const windows = new Set();
 
   if (IS_WIN) {
-    // One fast PowerShell call emitting "<ProcessName>\t<MainWindowTitle>" per
-    // process. (`tasklist /v` is reliable but painfully slow on some machines.)
+    // Only report apps that actually have a window on screen — the handful the
+    // student is using, not the ~100 background/system processes. (Blocking still
+    // scans every process via killMatching, so it's unaffected.)
     const out = await run("powershell", [
       "-NoProfile",
       "-NonInteractive",
       "-Command",
-      'Get-Process | ForEach-Object { $_.ProcessName + "`t" + $_.MainWindowTitle }',
+      'Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | ForEach-Object { $_.ProcessName + "`t" + $_.MainWindowTitle }',
     ]);
     for (const line of out.split(/\r?\n/)) {
       if (!line.trim()) continue;
@@ -177,33 +192,41 @@ async function killMatching(pattern) {
 
 // A pop-up message. Optional timeoutSec auto-closes it (a centered, top-most
 // window with an OK button + optional auto-dismiss timer).
+// Full-screen instructor message. The OK button is LOCKED and the window can't
+// be closed until `timeoutSec` elapses (a live countdown shows the remaining
+// time); then OK enables and the student can dismiss it. timeoutSec<=0 = OK is
+// available immediately (but still full-screen).
 function showMessage(text, timeoutSec) {
   text = text || "";
-  timeoutSec = Number(timeoutSec) || 0;
-  log(`instructor message: ${text}${timeoutSec ? ` (auto-close ${timeoutSec}s)` : ""}`);
+  timeoutSec = Math.max(0, Math.round(Number(timeoutSec) || 0));
+  log(`instructor message (fullscreen, hold ${timeoutSec}s): ${text}`);
   try {
     if (IS_WIN) {
       const safe = text.replace(/'/g, "''");
-      const timeoutMs = timeoutSec > 0 ? Math.round(timeoutSec * 1000) : 0;
       const ps =
         "Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase; " +
-        "$w=New-Object System.Windows.Window; $w.Title='iD Tech Instructor'; $w.SizeToContent='WidthAndHeight'; " +
-        "$w.WindowStartupLocation='CenterScreen'; $w.Topmost=$true; $w.ResizeMode='NoResize'; " +
-        "$sp=New-Object System.Windows.Controls.StackPanel; $sp.Margin='24'; " +
-        "$t=New-Object System.Windows.Controls.TextBlock; $t.Text='" + safe + "'; $t.FontSize=20; " +
-        "$t.TextWrapping='Wrap'; $t.MaxWidth=520; $t.Margin='0,0,0,16'; " +
-        "$b=New-Object System.Windows.Controls.Button; $b.Content='OK'; $b.Width=90; $b.HorizontalAlignment='Right'; " +
-        "$b.Add_Click({ $w.Close() }); $sp.Children.Add($t)|Out-Null; $sp.Children.Add($b)|Out-Null; $w.Content=$sp; " +
-        (timeoutMs > 0
-          ? "$tm=New-Object System.Windows.Threading.DispatcherTimer; $tm.Interval=[TimeSpan]::FromMilliseconds(" +
-            timeoutMs +
-            "); $tm.Add_Tick({ $tm.Stop(); $w.Close() }); $w.Add_Loaded({ $tm.Start() }); "
-          : "") +
-        "[void]$w.ShowDialog();";
+        "$script:rem=" + timeoutSec + "; " +
+        "$w=New-Object System.Windows.Window; $w.WindowStyle='None'; $w.WindowState='Maximized'; " +
+        "$w.Topmost=$true; $w.ResizeMode='NoResize'; " +
+        "$w.Background=(New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(10,13,8))); " +
+        "$sp=New-Object System.Windows.Controls.StackPanel; $sp.VerticalAlignment='Center'; $sp.HorizontalAlignment='Center'; $sp.MaxWidth=1100; " +
+        "$t=New-Object System.Windows.Controls.TextBlock; $t.Text='" + safe + "'; $t.FontSize=46; $t.FontWeight='Bold'; $t.TextWrapping='Wrap'; $t.TextAlignment='Center'; " +
+        "$t.Foreground=(New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(148,214,10))); $t.Margin='40,40,40,24'; " +
+        "$cd=New-Object System.Windows.Controls.TextBlock; $cd.FontSize=20; $cd.TextAlignment='Center'; $cd.Margin='0,0,0,20'; " +
+        "$cd.Foreground=(New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(150,160,140))); " +
+        "$b=New-Object System.Windows.Controls.Button; $b.Content='OK'; $b.Width=140; $b.Height=40; $b.FontSize=16; $b.HorizontalAlignment='Center'; " +
+        "$b.Add_Click({ $w.Close() }); " +
+        "$sp.Children.Add($t)|Out-Null; $sp.Children.Add($cd)|Out-Null; $sp.Children.Add($b)|Out-Null; $w.Content=$sp; " +
+        "$w.Add_Closing({ param($s,$e) if($script:rem -gt 0){ $e.Cancel=$true } }); " +
+        "if($script:rem -le 0){ $b.IsEnabled=$true; $cd.Text='' } else { $b.IsEnabled=$false; $cd.Text=(\"You can dismiss this in {0}s\" -f $script:rem); " +
+        "$tm=New-Object System.Windows.Threading.DispatcherTimer; $tm.Interval=[TimeSpan]::FromSeconds(1); " +
+        "$tm.Add_Tick({ $script:rem--; if($script:rem -le 0){ $tm.Stop(); $b.IsEnabled=$true; $cd.Text='' } else { $cd.Text=(\"You can dismiss this in {0}s\" -f $script:rem) } }); " +
+        "$w.Add_Loaded({ $tm.Start() }) } " +
+        "$w.Add_Loaded({ $w.Activate() }); [void]$w.ShowDialog();";
       execFile("powershell", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps], { windowsHide: true }, () => {});
     } else if (IS_MAC) {
       const safe = text.replace(/"/g, '\\"');
-      const giveUp = timeoutSec > 0 ? ` giving up after ${Math.round(timeoutSec)}` : "";
+      const giveUp = timeoutSec > 0 ? ` giving up after ${timeoutSec}` : "";
       execFile("osascript", ["-e", `display dialog "${safe}" with title "iD Tech Instructor" buttons {"OK"}${giveUp}`], () => {});
     }
   } catch (_) {
@@ -376,6 +399,10 @@ async function handleCommand(ws, msg) {
     log("all blocks cleared");
   } else if (action === "close_browsers") {
     await closeBrowsers();
+  } else if (action === "close_tab") {
+    closeCurrentTab();
+  } else if (action === "minimize_all") {
+    minimizeAll();
   } else if (action === "pause") {
     pauseScreen(p.text);
   } else if (action === "resume") {
@@ -418,6 +445,22 @@ function keepAwake() {
 async function closeBrowsers() {
   for (const b of BROWSER_NAMES) await killMatching(b);
   log("closed browsers");
+}
+
+// Close just the current (foreground) tab — Ctrl+W to the active window. This is
+// the "generic tab closer" that clears the offending page without killing every
+// browser window.
+function closeCurrentTab() {
+  if (!IS_WIN) return;
+  execFile("powershell", ["-NoProfile", "-Command", "(New-Object -ComObject WScript.Shell).SendKeys('^w')"], { windowsHide: true }, () => {});
+  log("closed current tab (Ctrl+W)");
+}
+
+// Rapid window minimizer — show the desktop (minimize every window).
+function minimizeAll() {
+  if (!IS_WIN) return;
+  execFile("powershell", ["-NoProfile", "-Command", "(New-Object -ComObject Shell.Application).MinimizeAll()"], { windowsHide: true }, () => {});
+  log("minimized all windows");
 }
 
 // -------------------------------------------------------------- pause / resume
@@ -544,10 +587,9 @@ function main() {
   const args = parseArgs();
   const deviceId = stableDeviceId(args.device);
 
-  if (typeof WebSocket === "undefined") {
+  if (!WS) {
     console.error(
-      "This Node version lacks a global WebSocket client (needs Node 22+). " +
-        "Upgrade Node, or ask for the `ws`-based variant."
+      "No WebSocket client available (needs Node 22+ global WebSocket, or the `ws` package)."
     );
     process.exit(1);
   }
@@ -568,7 +610,7 @@ function main() {
   function connect() {
     const url = args.server.replace(/\/+$/, "") + "/ws/agent";
     log(`connecting to ${url}`);
-    const ws = new WebSocket(url);
+    const ws = new WS(url);
     let statusTimer = null;
 
     ws.onopen = () => {
@@ -617,4 +659,8 @@ function main() {
   connect();
 }
 
-main();
+// Run when executed directly; export main() so the watchdog can run it in-process.
+if (require.main === module) {
+  main();
+}
+module.exports = { main };
