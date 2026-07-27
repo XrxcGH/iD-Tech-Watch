@@ -104,7 +104,15 @@ function spawnRole(role) {
   const bin = binForRole(role);
   const args = PACKAGED ? [role] : [bin, role];
   const cmd = PACKAGED ? bin : nodeBin();
-  const child = spawn(cmd, args, { cwd: DIR, detached: true, stdio: "ignore", windowsHide: true });
+  // Capture each worker's output to a log file (the agent's own log lines end up
+  // here) so you can see what's happening — e.g. "close tab (Ctrl+W)" and the
+  // build stamp — and confirm which agent version is actually running.
+  let stdio = "ignore";
+  try {
+    const fd = fs.openSync(path.join(DIR, `watch-${role}.log`), "a");
+    stdio = ["ignore", fd, fd];
+  } catch (_) {}
+  const child = spawn(cmd, args, { cwd: DIR, detached: true, stdio, windowsHide: true });
   child.unref();
   log(`(re)launched ${role} pid≈${child.pid}`);
 }
@@ -363,6 +371,23 @@ async function runLauncher() {
   addToStartup();
 
   log(`installed to ${DIR}`);
+
+  // Clean restart so re-running "Start" actually picks up refreshed code: if a
+  // pair is already running (old build), signal it to exit and wait for it, then
+  // start fresh. Without this, an update copied to disk wouldn't take effect
+  // because the old client process keeps its old code loaded in memory.
+  if (isAlive(readPid("client")) || isAlive(readPid("guardian"))) {
+    log("existing agent running — restarting it on the refreshed code…");
+    try {
+      fs.writeFileSync(STOP_FLAG, "restart");
+    } catch (_) {}
+    for (let i = 0; i < 20 && (isAlive(readPid("client")) || isAlive(readPid("guardian"))); i++)
+      await new Promise((r) => setTimeout(r, 200));
+    try {
+      if (fs.existsSync(STOP_FLAG)) fs.unlinkSync(STOP_FLAG);
+    } catch (_) {}
+  }
+
   if (!isAlive(readPid("client"))) spawnRole("client");
   if (!isAlive(readPid("guardian"))) spawnRole("guardian");
   log('both processes started — run "Stop iD Tech Watch.cmd" in that folder to stop both.');

@@ -47,6 +47,10 @@ const WS =
 const IS_WIN = process.platform === "win32";
 const IS_MAC = process.platform === "darwin";
 
+// Build stamp — logged on startup so you can confirm which agent version a
+// laptop is actually running (see watch-client.log in the install folder).
+const BUILD = "2026-07-27 close_tab=Ctrl+W · name-display · remove-device";
+
 const ENFORCE_INTERVAL_MS = 2000; // how often to sweep the blocklists
 const STATUS_INTERVAL_DEFAULT = 4; // seconds between status reports
 const MAX_PROCESSES = 400;
@@ -517,23 +521,16 @@ async function closeBrowsers() {
   log("closed browsers");
 }
 
-// Close the foreground window (clears the offending page/app in front). We send
-// a graceful WM_CLOSE straight to the window handle rather than synthesizing
-// Ctrl+W: an ELEVATED agent cannot inject keystrokes into a normal-integrity
-// window (Windows UIPI blocks it), which is why the old SendKeys('^w') silently
-// did nothing when the agent ran as Administrator. A high→medium window message
-// is permitted, so WM_CLOSE works whether or not the agent is elevated.
+// Close just the active browser TAB (Ctrl+W) — NOT the whole window. We inject
+// the keystroke with keybd_event (see pressVks): a hidden PowerShell can't steal
+// foreground focus, so the keys land on the focused browser, and an elevated
+// (High-integrity) agent is allowed to inject into a normal (Medium) browser —
+// UIPI only blocks the low→high direction. (WM_CLOSE closed the entire window;
+// WScript.Shell.SendKeys was unreliable.)
 function closeCurrentTab() {
   if (!IS_WIN) return;
-  const ps =
-    "Add-Type -Namespace IDTWin -Name Fg -MemberDefinition '" +
-    "[DllImport(\"user32.dll\")] public static extern System.IntPtr GetForegroundWindow();" +
-    "[DllImport(\"user32.dll\")] public static extern System.IntPtr SendMessageTimeout(System.IntPtr h,uint m,System.IntPtr w,System.IntPtr l,uint f,uint t,out System.IntPtr r);" +
-    "'; " +
-    "$h=[IDTWin.Fg]::GetForegroundWindow(); if($h -ne [System.IntPtr]::Zero){ $r=[System.IntPtr]::Zero; " +
-    "[void][IDTWin.Fg]::SendMessageTimeout($h,0x0010,[System.IntPtr]::Zero,[System.IntPtr]::Zero,0x2,3000,[ref]$r) }";
-  execFile("powershell", ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps], { windowsHide: true }, () => {});
-  log("closed foreground window (WM_CLOSE)");
+  pressVks([0x11, 0x57]); // Ctrl (0x11) + W (0x57)
+  log("close tab (Ctrl+W)");
 }
 
 // Show the desktop — minimize every window. We PostMessage the shell's own
@@ -581,14 +578,10 @@ function vkFor(token) {
   if (f) return 0x70 + (parseInt(f[1], 10) - 1); // F1..F24 -> 0x70..0x87
   return null;
 }
-function sendKeys(spec) {
-  if (!IS_WIN) return; // (macOS keystrokes would use osascript; not needed for the beta)
-  const tokens = Array.isArray(spec) ? spec : String(spec || "").split(/[+\s]+/);
-  const codes = tokens.map(vkFor).filter((c) => c != null);
-  if (!codes.length) {
-    log(`send_keys: unrecognized combo ${JSON.stringify(spec)}`);
-    return;
-  }
+// Press a chord of virtual-key codes on the focused window (down in order, then
+// up in reverse). Shared by sendKeys() and closeCurrentTab().
+function pressVks(codes) {
+  if (!IS_WIN || !codes || !codes.length) return;
   const vksCsv = codes.join(",");
   const extCsv = codes.map((c) => (VK_EXTENDED.has(c) ? 1 : 0)).join(",");
   const ps =
@@ -602,6 +595,16 @@ function sendKeys(spec) {
     // release in reverse (up = flag | KEYEVENTF_KEYUP(2))
     "for($i=$vks.Count-1;$i -ge 0;$i--){ [IDTWin.Key]::keybd_event([byte]$vks[$i],0,[uint32]($ext[$i] -bor 2),[System.IntPtr]::Zero) }";
   execFile("powershell", ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps], { windowsHide: true }, () => {});
+}
+function sendKeys(spec) {
+  if (!IS_WIN) return; // (macOS keystrokes would use osascript; not needed for the beta)
+  const tokens = Array.isArray(spec) ? spec : String(spec || "").split(/[+\s]+/);
+  const codes = tokens.map(vkFor).filter((c) => c != null);
+  if (!codes.length) {
+    log(`send_keys: unrecognized combo ${JSON.stringify(spec)}`);
+    return;
+  }
+  pressVks(codes);
   log(`send_keys: ${tokens.join("+")}`);
 }
 
@@ -809,6 +812,7 @@ function main() {
     process.exit(1);
   }
 
+  log(`build ${BUILD}`);
   log(`id=${deviceId}`);
   log(
     `location=${JSON.stringify(args.location)} building=${JSON.stringify(args.building)}` +

@@ -308,9 +308,11 @@ block `roblox` while sparing `studio`); `block_site` accepts `domain` or `domain
 both accept `duration_sec` (omit/0 = until lifted). `pause` accepts `text` and an
 optional `duration_sec` (auto-resume — the agent lifts on its own and the hub also
 sends a resume). `message` accepts `hold_sec` (OK is hidden/locked this long) and
-`auto_close_sec` (self-dismiss). `close_tab` gracefully closes the foreground
-window (WM_CLOSE); `minimize_all` shows the desktop (shell MIN_ALL); both work even
-when the agent runs elevated (they use window messages, not synthetic input).
+`auto_close_sec` (self-dismiss). `close_tab` closes the active browser **tab**
+(Ctrl+W via `keybd_event` on the focused window); `minimize_all` shows the desktop
+(shell MIN_ALL window message). Both work when the agent runs elevated — Windows
+UIPI only blocks low→high input, so a High-integrity agent may inject into the
+normal (Medium) browser, and a hidden helper never steals the browser's focus.
 `send_keys` presses a `keys` combo (`"win+d"`, `"ctrl+w"`, `"alt+F4"`, …) on the
 front window via `keybd_event`. `run_command` runs a shell `command` — it is
 **admin-only** (hub-enforced) and each agent ignores it unless started with
