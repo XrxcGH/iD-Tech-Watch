@@ -34,26 +34,29 @@
   --chip-neutral: rgba(16, 20, 10, 0.07);
 }
 
+/* Gruvbox-inspired dark theme (carried over from the le-flaco-takeover branch),
+ * adapted to this build's fuller variable set. Warm greys, iD-green + gruvbox
+ * yellow accents. This is the default view (see app.js theme default). */
 :root[data-theme="dark"] {
-  --id-green: #a6e61a;
-  --id-green-dark: #b6f23a;
-  --brand-ink: #b6f23a; /* bright green reads well on dark */
-  --id-green-soft: rgba(166, 230, 26, 0.14);
-  --ink: #e9efdd;
-  --muted: #8f9a80;
-  --line: #26302099;
-  --bg: #0e120b; /* deep charcoal-green */
-  --bg-2: #141a0f;
-  --card: #171d12;
-  --ok: #a6e61a;
-  --ok-dot: #a6e61a;
-  --off: #5c6650;
-  --danger: #ff6a5d;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 34px rgba(0, 0, 0, 0.5);
-  --glow: 0 0 0 1px rgba(166, 230, 26, 0.4), 0 6px 26px rgba(166, 230, 26, 0.25);
-  --grid-line: rgba(166, 230, 26, 0.09);
-  --topbar: rgba(20, 26, 15, 0.82);
-  --chip-neutral: rgba(233, 239, 221, 0.1);
+  --id-green: #b8bb26; /* gruvbox bright green */
+  --id-green-dark: #98971a;
+  --brand-ink: #d8db4b; /* readable green-on-dark */
+  --id-green-soft: rgba(184, 187, 38, 0.14);
+  --ink: #ebdbb2; /* gruvbox fg */
+  --muted: #a89984;
+  --line: #504945;
+  --bg: #1d2021; /* gruvbox hard bg */
+  --bg-2: #282828; /* gruvbox bg0 */
+  --card: #282828;
+  --ok: #b8bb26;
+  --ok-dot: #b8bb26;
+  --off: #7c6f64;
+  --danger: #fb4934;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 24px rgba(0, 0, 0, 0.45);
+  --glow: 0 0 0 1px rgba(184, 187, 38, 0.4), 0 6px 26px rgba(184, 187, 38, 0.22);
+  --grid-line: rgba(235, 219, 178, 0.06);
+  --topbar: rgba(40, 40, 40, 0.86);
+  --chip-neutral: rgba(235, 219, 178, 0.1);
 }
 
 * {
@@ -99,6 +102,23 @@ select {
   background: var(--card);
   color: var(--ink);
   width: 100%;
+}
+/* checkboxes/radios are not text fields — undo the text-input box styling so
+ * they render as normal small controls (they were inheriting padding, a border,
+ * and even min-width, which blew them up in the schedule target picker). */
+input[type="checkbox"],
+input[type="radio"] {
+  width: auto;
+  min-width: 0;
+  height: auto;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  flex: none;
+  accent-color: var(--id-green);
+  vertical-align: middle;
 }
 input:focus,
 select:focus {
@@ -595,18 +615,106 @@ select:focus {
   border-radius: 8px;
   padding: 5px 8px;
 }
+/* custom Block… dropdown (replaces the native <select>) */
+.blockmenu {
+  position: relative;
+  display: inline-block;
+}
 .block-select {
   width: auto;
-  padding: 5px 8px;
-  font-size: 12.5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  font-size: 14px;
   font-weight: 600;
+  color: var(--ink);
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--card);
   cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.block-select .caret {
+  font-size: 10px;
+  color: var(--muted);
+  transition: transform 0.15s;
 }
 .block-select:hover {
   border-color: var(--id-green);
+}
+.blockmenu.open .block-select {
+  border-color: var(--id-green);
+  box-shadow: var(--glow);
+}
+.blockmenu.open .block-select .caret {
+  transform: rotate(180deg);
+}
+.blockmenu-pop {
+  display: none;
+  position: absolute;
+  z-index: 55;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 232px;
+  max-height: 70vh;
+  overflow: auto;
+  padding: 6px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  animation: menuPop 0.12s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+/* NB: must NOT reuse modalPop — its end state translate(-50%,-50%) is for a
+ * centered modal and would shift this top-left-anchored menu off-screen. */
+@keyframes menuPop {
+  from { opacity: 0; transform: translateY(-6px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+.blockmenu-pop.open {
+  display: block;
+}
+.blockmenu-pop.up {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+.blockmenu-group + .blockmenu-group {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+.blockmenu-label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 700;
+  color: var(--muted);
+  padding: 6px 10px 3px;
+}
+.blockmenu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.blockmenu-item:hover {
+  background: var(--id-green-soft);
+  color: var(--brand-ink);
+}
+.blockmenu-item.danger {
+  color: var(--danger);
+}
+.blockmenu-item.danger:hover {
+  background: rgba(217, 45, 32, 0.12);
 }
 .list-title {
   font-size: 12px;
@@ -1055,7 +1163,7 @@ details.apps .procs {
 .field-inline > span {
   font-size: 12px;
 }
-.field-inline input,
+.field-inline input:not([type="checkbox"]):not([type="radio"]),
 .field-inline select {
   width: 100%;
   min-width: 200px;
@@ -1083,16 +1191,23 @@ details.apps .procs {
   color: #000;
 }
 
-.reorder,
-.row-actions {
+/* .reorder is a <span> in the building header (flex is fine); .row-actions is a
+ * <td> — flex would pull it out of the table row and misalign it, so it stays a
+ * normal cell and its buttons flow inline, centered on the row. */
+.reorder {
   display: inline-flex;
   gap: 4px;
   align-items: center;
+}
+.row-actions {
+  white-space: nowrap;
+  text-align: right;
 }
 .reorder .btn,
 .row-actions .btn {
   padding: 3px 7px;
   line-height: 1;
+  vertical-align: middle;
 }
 .sort-select {
   width: auto;
@@ -1398,11 +1513,155 @@ select {
   * { animation: none !important; }
 }
 
-/* dark-mode readability tweaks */
-:root[data-theme="dark"] .warn { background: rgba(255, 200, 90, 0.1); color: #ffcf7a; border-color: rgba(255, 200, 90, 0.28); }
+/* dark-mode readability tweaks (Gruvbox) */
+:root[data-theme="dark"] .warn { background: rgba(250, 189, 47, 0.12); color: #fabd2f; border-color: rgba(250, 189, 47, 0.3); }
 :root[data-theme="dark"] .os,
-:root[data-theme="dark"] .pill { background: rgba(255, 255, 255, 0.05); }
+:root[data-theme="dark"] .pill { background: rgba(235, 219, 178, 0.06); }
 :root[data-theme="dark"] .list { background: rgba(0, 0, 0, 0.22); }
-:root[data-theme="dark"] .seat { background: #1c2416; }
+:root[data-theme="dark"] .seat { background: #32302f; }
 :root[data-theme="dark"] input,
-:root[data-theme="dark"] select { background: #10150c; color: var(--ink); border-color: var(--line); }
+:root[data-theme="dark"] select,
+:root[data-theme="dark"] textarea { background: #1d2021; color: var(--ink); border-color: var(--line); }
+
+/* --------------------------------------------------------------- modal dialogs */
+#modal {
+  display: none;
+}
+#modal.open {
+  display: block;
+}
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 60;
+  backdrop-filter: blur(2px);
+}
+.modal-card {
+  position: fixed;
+  z-index: 61;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(460px, 94vw);
+  max-height: 88vh;
+  overflow: auto;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  animation: modalPop 0.16s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@keyframes modalPop {
+  from { opacity: 0; transform: translate(-50%, -46%) scale(0.98); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 15px 18px;
+  border-bottom: 1px solid var(--line);
+}
+.modal-head h3 {
+  font-size: 16px;
+  font-weight: 700;
+}
+.modal-x {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 16px;
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+.modal-x:hover {
+  background: var(--chip-neutral);
+  color: var(--ink);
+}
+.modal-body {
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px 16px;
+}
+.modal-msg {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.modal-label {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.modal-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+.modal-hint.tight {
+  margin-top: -2px;
+}
+.modal-input {
+  width: 100%;
+}
+textarea.modal-input {
+  resize: vertical;
+  min-height: 64px;
+  line-height: 1.4;
+}
+
+/* the message / lock composer */
+.composer {
+  gap: 10px;
+}
+.composer-seg {
+  display: flex;
+  gap: 6px;
+}
+.composer-seg .seg-btn {
+  flex: 1;
+}
+.composer-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--chip-neutral);
+}
+
+/* live block-countdown span inside a chip (ticked in place, no rebuild) */
+.chip .cd {
+  opacity: 0.8;
+  font-variant-numeric: tabular-nums;
+}
+
+/* remote-command result output */
+.exec-out {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--chip-neutral);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 46vh;
+  overflow: auto;
+}
+.exec-out.err {
+  color: var(--danger);
+}

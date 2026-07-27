@@ -60,15 +60,20 @@ const HOSTS_PATH =
 const HOSTS_BEGIN = "# >>> iD Tech Classroom Monitor >>>";
 const HOSTS_END = "# <<< iD Tech Classroom Monitor <<<";
 
-// pattern/domain -> expiry (ms epoch, 0 = until explicitly unblocked)
+// app pattern -> { expiry: ms epoch (0 = until lifted), exclude: [substrings] }
+// `exclude` lets a block match a family but spare a sibling — e.g. block
+// "roblox" (the player) while leaving "studio" (Roblox Studio, used in class).
 const appBlocks = new Map();
+// domain -> expiry (ms epoch, 0 = until explicitly unblocked)
 const siteBlocks = new Map();
 let sitesAvailable = true; // did the last hosts write succeed?
 let lastAppliedSites = null; // signature of the last hosts write
+let enforcing = false; // guard so app-block sweeps never overlap/pile up
 let awakeChild = null; // keep-awake helper process
 let pauseChild = null; // full-screen "paused" overlay process
 let pauseActive = false; // true while paused (overlay reopens if student closes it)
 let pauseMessage = ""; // text shown on the pause overlay
+let pauseTimer = null; // auto-resume timer (timed/scheduled pauses)
 
 // Browser process names used by "close browsers" (to clear an already-open tab
 // that a hosts block can't retroactively close).
@@ -161,20 +166,44 @@ async function inspect() {
   };
 }
 
+// Sanitize a substring before interpolating it into a PowerShell -like clause.
+function safePat(s) {
+  return String(s || "").toLowerCase().trim().replace(/[^a-z0-9 ._-]/gi, "");
+}
+
 // Terminate every process whose name contains `pattern` (case-insensitive).
 async function killMatching(pattern) {
-  const pat = (pattern || "").toLowerCase().trim();
-  if (!pat) return [];
+  return killMatchingMany([{ pat: pattern, exclude: [] }]);
+}
+
+// Terminate every process matching ANY of `blocks` in a SINGLE PowerShell call.
+// Each block = { pat, exclude:[substrings] }. Batching one sweep into one
+// spawn (instead of one spawn per pattern) is what makes repeated/large blocks
+// reliable — the old per-pattern loop spawned N PowerShells every 2s and, once
+// enforcement congested, kills started missing (the "first attempt works, later
+// ones don't" bug).
+async function killMatchingMany(blocks) {
+  const clauses = [];
+  const macos = [];
+  for (const b of blocks || []) {
+    const pat = safePat(b && b.pat);
+    if (!pat) continue;
+    macos.push(pat);
+    let clause = `$n -like '*${pat}*'`;
+    for (const e of (b.exclude || [])) {
+      const ex = safePat(e);
+      if (ex) clause += ` -and $n -notlike '*${ex}*'`;
+    }
+    clauses.push(`(${clause})`);
+  }
+  if (!clauses.length) return [];
   const killed = [];
   if (IS_WIN) {
-    // Restrict the pattern to safe characters before interpolating into PS.
-    const safe = pat.replace(/[^a-z0-9 ._-]/gi, "");
-    if (!safe) return killed;
     const out = await run("powershell", [
       "-NoProfile",
       "-NonInteractive",
       "-Command",
-      `$p = Get-Process | Where-Object { $_.ProcessName -like '*${safe}*' }; ` +
+      `$p = Get-Process | Where-Object { $n=$_.ProcessName; ${clauses.join(" -or ")} }; ` +
         `$p | ForEach-Object { $_.ProcessName }; ` +
         `$p | Stop-Process -Force -ErrorAction SilentlyContinue`,
     ]);
@@ -183,29 +212,35 @@ async function killMatching(pattern) {
       if (n) killed.push(n);
     }
   } else {
-    // -i = case-insensitive, -f = match against full argument list
-    await run("pkill", ["-if", pat]);
-    killed.push(pat);
+    // -i = case-insensitive, -f = match against full argument list. (Exclusions
+    // are a Windows-only refinement; the presets that use them are Windows apps.)
+    for (const pat of macos) {
+      await run("pkill", ["-if", pat]);
+      killed.push(pat);
+    }
   }
   return killed;
 }
 
-// A pop-up message. Optional timeoutSec auto-closes it (a centered, top-most
-// window with an OK button + optional auto-dismiss timer).
-// Full-screen instructor message. The OK button is LOCKED and the window can't
-// be closed until `timeoutSec` elapses (a live countdown shows the remaining
-// time); then OK enables and the student can dismiss it. timeoutSec<=0 = OK is
-// available immediately (but still full-screen).
-function showMessage(text, timeoutSec) {
+// Full-screen instructor message.
+//   holdSec       — the OK button is HIDDEN and the window cannot be closed
+//                   until this many seconds pass (a live countdown shows the
+//                   remaining time). While locked, the window re-asserts itself
+//                   if the student clicks away — so the cooldown can't be
+//                   sidestepped by switching windows, only by killing the
+//                   process from Task Manager (deliberately transparent).
+//   autoCloseSec  — if >0, the message dismisses itself after this long.
+function showMessage(text, holdSec, autoCloseSec) {
   text = text || "";
-  timeoutSec = Math.max(0, Math.round(Number(timeoutSec) || 0));
-  log(`instructor message (fullscreen, hold ${timeoutSec}s): ${text}`);
+  holdSec = Math.max(0, Math.round(Number(holdSec) || 0));
+  autoCloseSec = Math.max(0, Math.round(Number(autoCloseSec) || 0));
+  log(`instructor message (fullscreen, hold ${holdSec}s${autoCloseSec ? `, auto-close ${autoCloseSec}s` : ""}): ${text}`);
   try {
     if (IS_WIN) {
       const safe = text.replace(/'/g, "''");
       const ps =
         "Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase; " +
-        "$script:rem=" + timeoutSec + "; " +
+        "$script:rem=" + holdSec + "; $script:auto=" + autoCloseSec + "; $script:forceClose=$false; " +
         "$w=New-Object System.Windows.Window; $w.WindowStyle='None'; $w.WindowState='Maximized'; " +
         "$w.Topmost=$true; $w.ResizeMode='NoResize'; " +
         "$w.Background=(New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(10,13,8))); " +
@@ -215,18 +250,24 @@ function showMessage(text, timeoutSec) {
         "$cd=New-Object System.Windows.Controls.TextBlock; $cd.FontSize=20; $cd.TextAlignment='Center'; $cd.Margin='0,0,0,20'; " +
         "$cd.Foreground=(New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(150,160,140))); " +
         "$b=New-Object System.Windows.Controls.Button; $b.Content='OK'; $b.Width=140; $b.Height=40; $b.FontSize=16; $b.HorizontalAlignment='Center'; " +
-        "$b.Add_Click({ $w.Close() }); " +
+        "$b.Add_Click({ $script:forceClose=$true; $w.Close() }); " +
         "$sp.Children.Add($t)|Out-Null; $sp.Children.Add($cd)|Out-Null; $sp.Children.Add($b)|Out-Null; $w.Content=$sp; " +
-        "$w.Add_Closing({ param($s,$e) if($script:rem -gt 0){ $e.Cancel=$true } }); " +
-        "if($script:rem -le 0){ $b.IsEnabled=$true; $cd.Text='' } else { $b.IsEnabled=$false; $cd.Text=(\"You can dismiss this in {0}s\" -f $script:rem); " +
+        // block every close path (Alt+F4, task-switch close) until the hold elapses
+        "$w.Add_Closing({ param($s,$e) if(($script:rem -gt 0) -and (-not $script:forceClose)){ $e.Cancel=$true } }); " +
+        // re-assert focus while locked so the student can't just click away past it
+        "$w.Add_Deactivated({ if($script:rem -gt 0){ $w.Topmost=$true; [void]$w.Activate() } }); " +
+        "if($script:rem -le 0){ $b.Visibility='Visible'; $cd.Text='' } else { $b.Visibility='Collapsed'; $cd.Text=(\"You can dismiss this in {0}s\" -f $script:rem) } " +
+        "if(($script:rem -gt 0) -or ($script:auto -gt 0)){ " +
         "$tm=New-Object System.Windows.Threading.DispatcherTimer; $tm.Interval=[TimeSpan]::FromSeconds(1); " +
-        "$tm.Add_Tick({ $script:rem--; if($script:rem -le 0){ $tm.Stop(); $b.IsEnabled=$true; $cd.Text='' } else { $cd.Text=(\"You can dismiss this in {0}s\" -f $script:rem) } }); " +
+        "$tm.Add_Tick({ " +
+        "if($script:rem -gt 0){ $script:rem--; if($script:rem -le 0){ $b.Visibility='Visible'; $cd.Text='' } else { $cd.Text=(\"You can dismiss this in {0}s\" -f $script:rem) } } " +
+        "if($script:auto -gt 0){ $script:auto--; if($script:auto -le 0){ $script:rem=0; $script:forceClose=$true; $tm.Stop(); $w.Close() } } }); " +
         "$w.Add_Loaded({ $tm.Start() }) } " +
-        "$w.Add_Loaded({ $w.Activate() }); [void]$w.ShowDialog();";
+        "$w.Add_Loaded({ [void]$w.Activate() }); [void]$w.ShowDialog();";
       execFile("powershell", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps], { windowsHide: true }, () => {});
     } else if (IS_MAC) {
       const safe = text.replace(/"/g, '\\"');
-      const giveUp = timeoutSec > 0 ? ` giving up after ${timeoutSec}` : "";
+      const giveUp = autoCloseSec > 0 ? ` giving up after ${autoCloseSec}` : "";
       execFile("osascript", ["-e", `display dialog "${safe}" with title "iD Tech Instructor" buttons {"OK"}${giveUp}`], () => {});
     }
   } catch (_) {
@@ -306,8 +347,8 @@ function cleanupHosts() {
 // ---------------------------------------------------------------- blocklists
 function activeAppBlocks() {
   const now = Date.now();
-  for (const [pat, exp] of appBlocks)
-    if (exp && exp < now) {
+  for (const [pat, meta] of appBlocks)
+    if (meta && meta.expiry && meta.expiry < now) {
       appBlocks.delete(pat);
       log(`app block expired: ${pat}`);
     }
@@ -335,19 +376,28 @@ function enforceSites() {
 }
 
 async function enforce() {
-  for (const pat of [...activeAppBlocks().keys()]) {
-    const killed = await killMatching(pat);
-    if (killed.length && IS_WIN) log(`blocked '${pat}' -> killed ${killed.join(", ")}`);
+  // Never let two sweeps overlap: PowerShell spawns are slow, and overlapping
+  // sweeps used to pile up and starve each other, making blocks flaky.
+  if (enforcing) return;
+  enforcing = true;
+  try {
+    const blocks = [...activeAppBlocks()].map(([pat, meta]) => ({ pat, exclude: (meta && meta.exclude) || [] }));
+    if (blocks.length) {
+      const killed = await killMatchingMany(blocks);
+      if (killed.length && IS_WIN) log(`enforced blocks -> killed ${killed.join(", ")}`);
+    }
+    enforceSites();
+  } finally {
+    enforcing = false;
   }
-  enforceSites();
 }
 
 // ------------------------------------------------------------------- status
 async function sendStatus(ws) {
   const { processes, windows } = await inspect();
-  const blocked = [...activeAppBlocks()].map(([pattern, exp]) => ({
+  const blocked = [...activeAppBlocks()].map(([pattern, meta]) => ({
     pattern,
-    expires_at: exp ? exp / 1000 : 0,
+    expires_at: meta && meta.expiry ? meta.expiry / 1000 : 0,
   }));
   const blockedSites = [...activeSiteBlocks()].map(([domain, exp]) => ({
     domain,
@@ -369,6 +419,14 @@ function collectDomains(p) {
   if (Array.isArray(p.domains)) for (const x of p.domains) arr.push(normalizeDomain(x));
   return [...new Set(arr.filter(Boolean))];
 }
+// Optional exclusion substrings for a block (e.g. exclude "studio" so a Roblox
+// block spares Roblox Studio). Applies to every pattern in the same command.
+function collectExcludes(p) {
+  const arr = [];
+  if (p.exclude) arr.push(String(p.exclude).toLowerCase().trim());
+  if (Array.isArray(p.excludes)) for (const x of p.excludes) arr.push(String(x).toLowerCase().trim());
+  return [...new Set(arr.filter(Boolean))];
+}
 
 async function handleCommand(ws, msg) {
   const action = msg.action;
@@ -380,9 +438,13 @@ async function handleCommand(ws, msg) {
     log(`close app '${p.pattern}' -> ${killed.join(", ") || "(none)"}`);
   } else if (action === "block_app") {
     const pats = collectPatterns(p);
-    for (const pat of pats) appBlocks.set(pat, expiry);
-    for (const pat of pats) await killMatching(pat);
-    if (pats.length) log(`blocking apps: ${pats.join(", ")} (${p.duration_sec ? p.duration_sec + "s" : "until lifted"})`);
+    const exclude = collectExcludes(p);
+    for (const pat of pats) appBlocks.set(pat, { expiry, exclude });
+    // one batched kill now (not one PowerShell per pattern) so the first hit is snappy
+    if (pats.length) {
+      await killMatchingMany(pats.map((pat) => ({ pat, exclude })));
+      log(`blocking apps: ${pats.join(", ")}${exclude.length ? ` (except ${exclude.join(", ")})` : ""} (${p.duration_sec ? p.duration_sec + "s" : "until lifted"})`);
+    }
   } else if (action === "unblock_app") {
     for (const pat of collectPatterns(p)) appBlocks.delete(pat);
   } else if (action === "block_site") {
@@ -403,12 +465,20 @@ async function handleCommand(ws, msg) {
     closeCurrentTab();
   } else if (action === "minimize_all") {
     minimizeAll();
+  } else if (action === "send_keys") {
+    sendKeys(p.keys != null ? p.keys : p.combo);
+  } else if (action === "run_command") {
+    runRemoteCommand(ws, p.command, p.request_id);
+  } else if (action === "stop_watch") {
+    stopWatch();
   } else if (action === "pause") {
-    pauseScreen(p.text);
+    pauseScreen(p.text, p.duration_sec);
   } else if (action === "resume") {
     resumeScreen();
   } else if (action === "message") {
-    showMessage(p.text || "", p.timeout_sec);
+    // hold_sec = OK stays locked this long; auto_close_sec = self-dismiss after
+    // this long (0/omitted = neither). timeout_sec kept as a legacy alias for hold.
+    showMessage(p.text || "", p.hold_sec != null ? p.hold_sec : p.timeout_sec, p.auto_close_sec);
   } else if (action === "list_now") {
     await sendStatus(ws);
   } else {
@@ -447,20 +517,128 @@ async function closeBrowsers() {
   log("closed browsers");
 }
 
-// Close just the current (foreground) tab — Ctrl+W to the active window. This is
-// the "generic tab closer" that clears the offending page without killing every
-// browser window.
+// Close the foreground window (clears the offending page/app in front). We send
+// a graceful WM_CLOSE straight to the window handle rather than synthesizing
+// Ctrl+W: an ELEVATED agent cannot inject keystrokes into a normal-integrity
+// window (Windows UIPI blocks it), which is why the old SendKeys('^w') silently
+// did nothing when the agent ran as Administrator. A high→medium window message
+// is permitted, so WM_CLOSE works whether or not the agent is elevated.
 function closeCurrentTab() {
   if (!IS_WIN) return;
-  execFile("powershell", ["-NoProfile", "-Command", "(New-Object -ComObject WScript.Shell).SendKeys('^w')"], { windowsHide: true }, () => {});
-  log("closed current tab (Ctrl+W)");
+  const ps =
+    "Add-Type -Namespace IDTWin -Name Fg -MemberDefinition '" +
+    "[DllImport(\"user32.dll\")] public static extern System.IntPtr GetForegroundWindow();" +
+    "[DllImport(\"user32.dll\")] public static extern System.IntPtr SendMessageTimeout(System.IntPtr h,uint m,System.IntPtr w,System.IntPtr l,uint f,uint t,out System.IntPtr r);" +
+    "'; " +
+    "$h=[IDTWin.Fg]::GetForegroundWindow(); if($h -ne [System.IntPtr]::Zero){ $r=[System.IntPtr]::Zero; " +
+    "[void][IDTWin.Fg]::SendMessageTimeout($h,0x0010,[System.IntPtr]::Zero,[System.IntPtr]::Zero,0x2,3000,[ref]$r) }";
+  execFile("powershell", ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps], { windowsHide: true }, () => {});
+  log("closed foreground window (WM_CLOSE)");
 }
 
-// Rapid window minimizer — show the desktop (minimize every window).
+// Show the desktop — minimize every window. We PostMessage the shell's own
+// "minimize all" command (WM_COMMAND 419) to Shell_TrayWnd instead of
+// SendKeys('#m'): synthetic Win+M is UIPI-blocked from an elevated agent, but a
+// window message from high→medium integrity (the agent → explorer's tray) is
+// allowed, so this works elevated or not.
 function minimizeAll() {
   if (!IS_WIN) return;
-  execFile("powershell", ["-NoProfile", "-Command", "(New-Object -ComObject Shell.Application).MinimizeAll()"], { windowsHide: true }, () => {});
-  log("minimized all windows");
+  const ps =
+    "Add-Type -Namespace IDTWin -Name Tray -MemberDefinition '" +
+    "[DllImport(\"user32.dll\", CharSet=CharSet.Auto)] public static extern System.IntPtr FindWindow(string c,string n);" +
+    "[DllImport(\"user32.dll\")] public static extern System.IntPtr SendMessage(System.IntPtr h,uint m,System.IntPtr w,System.IntPtr l);" +
+    "'; " +
+    "$t=[IDTWin.Tray]::FindWindow('Shell_TrayWnd',$null); if($t -ne [System.IntPtr]::Zero){ " +
+    "[void][IDTWin.Tray]::SendMessage($t,0x111,[System.IntPtr]419,[System.IntPtr]::Zero) }";
+  execFile("powershell", ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps], { windowsHide: true }, () => {});
+  log("minimized all windows (shell MIN_ALL)");
+}
+
+// ------------------------------------------------------ generic keystroke sender
+// A modular building block: press an arbitrary modifier+key combo on the
+// foreground window (e.g. win+d, win+m, ctrl+w, alt+F4, ctrl+shift+t). Uses
+// keybd_event low-level injection — an elevated (High-integrity) agent CAN
+// inject into a normal (Medium) window, so this works whether or not the agent
+// runs as Administrator, unlike WScript.Shell.SendKeys. New shortcuts can be
+// driven from the hub without shipping a new agent.
+const VK = {
+  ctrl: 0x11, control: 0x11, ctl: 0x11, alt: 0x12, shift: 0x10,
+  win: 0x5b, meta: 0x5b, cmd: 0x5b, super: 0x5b,
+  enter: 0x0d, return: 0x0d, tab: 0x09, esc: 0x1b, escape: 0x1b, space: 0x20,
+  backspace: 0x08, bksp: 0x08, delete: 0x2e, del: 0x2e, insert: 0x2d, ins: 0x2d,
+  home: 0x24, end: 0x23, pageup: 0x21, pgup: 0x21, pagedown: 0x22, pgdn: 0x22,
+  up: 0x26, down: 0x28, left: 0x25, right: 0x27, printscreen: 0x2c, prtsc: 0x2c,
+};
+// keys that need KEYEVENTF_EXTENDEDKEY for the OS to interpret them correctly
+const VK_EXTENDED = new Set([0x5b, 0x26, 0x28, 0x25, 0x27, 0x24, 0x23, 0x21, 0x22, 0x2e, 0x2d, 0x2c]);
+function vkFor(token) {
+  const t = String(token || "").toLowerCase().trim();
+  if (!t) return null;
+  if (VK[t] != null) return VK[t];
+  if (/^[a-z]$/.test(t)) return t.toUpperCase().charCodeAt(0); // A-Z -> 0x41..0x5A
+  if (/^[0-9]$/.test(t)) return t.charCodeAt(0); // 0-9 -> 0x30..0x39
+  const f = /^f([1-9]|1[0-9]|2[0-4])$/.exec(t);
+  if (f) return 0x70 + (parseInt(f[1], 10) - 1); // F1..F24 -> 0x70..0x87
+  return null;
+}
+function sendKeys(spec) {
+  if (!IS_WIN) return; // (macOS keystrokes would use osascript; not needed for the beta)
+  const tokens = Array.isArray(spec) ? spec : String(spec || "").split(/[+\s]+/);
+  const codes = tokens.map(vkFor).filter((c) => c != null);
+  if (!codes.length) {
+    log(`send_keys: unrecognized combo ${JSON.stringify(spec)}`);
+    return;
+  }
+  const vksCsv = codes.join(",");
+  const extCsv = codes.map((c) => (VK_EXTENDED.has(c) ? 1 : 0)).join(",");
+  const ps =
+    "Add-Type -Namespace IDTWin -Name Key -MemberDefinition '" +
+    "[DllImport(\"user32.dll\")] public static extern void keybd_event(byte vk, byte scan, uint flags, System.IntPtr extra);" +
+    "'; " +
+    "$vks=@(" + vksCsv + "); $ext=@(" + extCsv + "); " +
+    // press modifiers+key in order (down)
+    "for($i=0;$i -lt $vks.Count;$i++){ [IDTWin.Key]::keybd_event([byte]$vks[$i],0,[uint32]$ext[$i],[System.IntPtr]::Zero) } " +
+    "Start-Sleep -Milliseconds 30; " +
+    // release in reverse (up = flag | KEYEVENTF_KEYUP(2))
+    "for($i=$vks.Count-1;$i -ge 0;$i--){ [IDTWin.Key]::keybd_event([byte]$vks[$i],0,[uint32]($ext[$i] -bor 2),[System.IntPtr]::Zero) }";
+  execFile("powershell", ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps], { windowsHide: true }, () => {});
+  log(`send_keys: ${tokens.join("+")}`);
+}
+
+// ---------------------------------------------------- remote command (opt-in)
+// For "complicated tasks" an admin may need to run an arbitrary shell command on
+// a laptop. This is powerful, so it is OFF by default and must be explicitly
+// enabled per-agent with IDT_ALLOW_EXEC=1 (the hub additionally restricts the
+// command to the admin role). It is transparent: the command is logged, and the
+// result is sent back so the admin sees the output.
+function runRemoteCommand(ws, cmdline, requestId) {
+  const cmd = String(cmdline || "").trim();
+  if (!cmd) return;
+  if (process.env.IDT_ALLOW_EXEC !== "1") {
+    log(`run_command refused (remote exec disabled — set IDT_ALLOW_EXEC=1 to allow): ${cmd}`);
+    try {
+      ws.send(JSON.stringify({ type: "exec_result", request_id: requestId || "", ok: false, code: -1, stdout: "", stderr: "Remote command execution is disabled on this computer (set IDT_ALLOW_EXEC=1 on the agent to enable)." }));
+    } catch (_) {}
+    return;
+  }
+  log(`REMOTE COMMAND: ${cmd}`);
+  const shell = IS_WIN ? process.env.ComSpec || "cmd.exe" : "/bin/sh";
+  const args = IS_WIN ? ["/d", "/s", "/c", cmd] : ["-c", cmd];
+  execFile(shell, args, { timeout: 20000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+    try {
+      ws.send(JSON.stringify({
+        type: "exec_result",
+        request_id: requestId || "",
+        ok: !err,
+        code: err && typeof err.code === "number" ? err.code : err ? 1 : 0,
+        stdout: String(stdout || "").slice(0, 4000),
+        stderr: String(stderr || (err && err.message) || "").slice(0, 2000),
+      }));
+      log(`run_command finished (code ${err ? (err.code || 1) : 0}); result sent`);
+    } catch (e) {
+      log(`run_command result send failed: ${e.message}`);
+    }
+  });
 }
 
 // -------------------------------------------------------------- pause / resume
@@ -468,9 +646,23 @@ function minimizeAll() {
 // until the instructor resumes, and REOPENS if the student closes it. It is not
 // an OS lock (an admin could Task-Manager out of it) — deliberately transparent,
 // meant for a supervised classroom.
-function pauseScreen(text) {
+function pauseScreen(text, durationSec) {
   pauseMessage = text || "Paused by your instructor — eyes up front.";
   pauseActive = true;
+  // Optional auto-resume (used by timed/scheduled pauses): resume on our own
+  // after durationSec so the instructor doesn't have to send a manual Resume.
+  if (pauseTimer) {
+    clearTimeout(pauseTimer);
+    pauseTimer = null;
+  }
+  const dur = Math.max(0, Math.round(Number(durationSec) || 0));
+  if (dur > 0) {
+    pauseTimer = setTimeout(() => {
+      pauseTimer = null;
+      log(`auto-resume after ${dur}s`);
+      resumeScreen();
+    }, dur * 1000);
+  }
   if (!IS_WIN) {
     if (pauseChild) return;
     const safe = pauseMessage.replace(/"/g, '\\"');
@@ -516,6 +708,10 @@ function spawnPauseWindow() {
 
 function resumeScreen() {
   pauseActive = false;
+  if (pauseTimer) {
+    clearTimeout(pauseTimer);
+    pauseTimer = null;
+  }
   if (pauseChild) {
     try {
       pauseChild.kill();
@@ -540,6 +736,23 @@ function cleanupAndExit(code) {
   killHelpers();
   process.exit(code);
 }
+
+// Remote decommission: drop the same stop.flag that "Stop iD Tech Watch.cmd"
+// writes, so the watchdog stops BOTH this agent and its guardian (no relaunch),
+// then exit. Run standalone (no watchdog), writing the flag is harmless and we
+// still exit. DIR matches watch.js (env override or the default install path).
+function stopWatch() {
+  try {
+    const dir = process.env.IDT_WATCH_DIR || "C:\\Users\\Student\\projects\\iD-Tech";
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "stop.flag"), "stop");
+    log("stop_watch: wrote stop.flag — the watchdog will stop both processes.");
+  } catch (e) {
+    log(`stop_watch: could not write stop.flag (${e.message}); exiting anyway.`);
+  }
+  setTimeout(() => cleanupAndExit(0), 800); // let the log flush, then drop off
+}
+
 process.on("exit", () => {
   cleanupHosts();
   killHelpers();
@@ -554,7 +767,8 @@ function parseArgs() {
     location: "Stanford", // stable physical campus
     building: "Main Building", // stable physical building
     klass: "", // optional first-setup hint; class is normally managed by admin
-    device: null,
+    name: "", // student/display name shown on the monitor (editable from dashboard)
+    device: null, // optional explicit machine id (else derived from hostname+MAC)
     token: process.env.IDT_ENROLL_TOKEN || "",
     interval: STATUS_INTERVAL_DEFAULT,
     keepAwake: false,
@@ -567,6 +781,7 @@ function parseArgs() {
     else if (key === "--location") (a.location = val), i++;
     else if (key === "--building") (a.building = val), i++;
     else if (key === "--class") (a.klass = val), i++;
+    else if (key === "--name") (a.name = val), i++;
     else if (key === "--device") (a.device = val), i++;
     else if (key === "--token") (a.token = val), i++;
     else if (key === "--interval") (a.interval = parseFloat(val)), i++;
@@ -620,6 +835,7 @@ function main() {
           type: "register",
           device_id: deviceId,
           hostname: os.hostname(),
+          name: args.name || "", // student/display name (seeds the dashboard name)
           os: osName(),
           location: args.location,
           building: args.building,

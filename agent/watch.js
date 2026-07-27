@@ -131,17 +131,37 @@ function writeStartScript() {
   return path.join(DIR, "Start iD Tech Watch.cmd");
 }
 
-// Auto-start on login by placing the launcher in the user's Startup folder
+// The install dir lives under a specific user's profile (C:\Users\<user>\...).
+// Auto-start must land in THAT user's Startup folder — the classroom "Student"
+// account — NOT whatever account launched us. This is the fix for "doesn't boot
+// on startup": run_agent self-elevates, so the launcher often runs as an admin,
+// and the old code wrote to the admin's APPDATA Startup, which Student never sees.
+function profileFromDir() {
+  const m = /^([a-z]:\\Users\\)([^\\]+)(?:\\|$)/i.exec(DIR);
+  return m ? { root: m[1], user: m[2], profile: m[1] + m[2] } : null;
+}
+function userStartupDir() {
+  const p = profileFromDir();
+  if (p && fs.existsSync(p.profile))
+    return path.join(p.profile, "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "Startup");
+  // fallback: whoever is running us
+  return process.env.APPDATA
+    ? path.join(process.env.APPDATA, "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+    : "";
+}
+
+// Auto-start on login by placing the launcher in that user's Startup folder
 // (shell:startup). Uses a tiny hidden .vbs so no console flashes at logon.
 function addToStartup() {
   if (!IS_WIN) return;
   try {
-    const startupDir = path.join(process.env.APPDATA || "", "Microsoft", "Windows", "Start Menu", "Programs", "Startup");
-    if (!startupDir || !fs.existsSync(startupDir)) return;
+    const startupDir = userStartupDir();
+    if (!startupDir) return;
+    fs.mkdirSync(startupDir, { recursive: true }); // already exists for a real user; harmless
     const startCmd = path.join(DIR, "Start iD Tech Watch.cmd");
     const vbs = `Set s = CreateObject("WScript.Shell")\r\ns.Run """" & "${startCmd.replace(/\\/g, "\\\\")}" & """", 0, False\r\n`;
     fs.writeFileSync(path.join(startupDir, "iD Tech Watch.vbs"), vbs);
-    log("added to Startup (auto-starts on login).");
+    log(`added to Startup for auto-start on login: ${startupDir}`);
   } catch (e) {
     log(`could not add to Startup: ${e.message}`);
   }
@@ -149,7 +169,11 @@ function addToStartup() {
 
 // ---- config --------------------------------------------------------------
 function loadConfig() {
-  const cfg = { server: "", location: "Stanford", building: "Main Building", device: "", klass: "", token: "" };
+  // `name` = the student/display name shown on the monitor (editable later from
+  // the dashboard). `device` = an OPTIONAL explicit stable machine id; normally
+  // left blank so the agent derives a stable id from hostname+MAC. The two are
+  // different: the display name must not become the permanent device id.
+  const cfg = { server: "", location: "Stanford", building: "Main Building", name: "", device: "", klass: "", token: "" };
   // 1) file next to the program / in DIR
   for (const f of [path.join(path.dirname(process.execPath), "watch-config.json"), CONFIG_FILE]) {
     try {
@@ -161,6 +185,7 @@ function loadConfig() {
   cfg.server = process.env.IDT_SERVER || cfg.server;
   cfg.location = process.env.IDT_LOCATION || cfg.location;
   cfg.building = process.env.IDT_BUILDING || cfg.building;
+  cfg.name = process.env.IDT_NAME || cfg.name;
   cfg.device = process.env.IDT_DEVICE || cfg.device;
   cfg.token = process.env.IDT_ENROLL_TOKEN || cfg.token;
   // 3) CLI flags (highest priority). The launcher has no role token at argv[2],
@@ -170,6 +195,7 @@ function loadConfig() {
     if (a[i] === "--server") cfg.server = a[++i];
     else if (a[i] === "--location") cfg.location = a[++i];
     else if (a[i] === "--building") cfg.building = a[++i];
+    else if (a[i] === "--name") cfg.name = a[++i];
     else if (a[i] === "--device") cfg.device = a[++i];
     else if (a[i] === "--class") cfg.klass = a[++i];
     else if (a[i] === "--token") cfg.token = a[++i];
@@ -230,17 +256,20 @@ function promptForConfig(cfg) {
     "Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase | Out-Null; " +
     "$w=New-Object System.Windows.Window; $w.Title='iD Tech Watch - Set up this laptop'; " +
     "$w.SizeToContent='WidthAndHeight'; $w.WindowStartupLocation='CenterScreen'; $w.Topmost=$true; $w.ResizeMode='NoResize'; " +
-    "$g=New-Object System.Windows.Controls.StackPanel; $g.Margin='18'; $g.MinWidth=400; " +
-    "$h=New-Object System.Windows.Controls.TextBlock; $h.Text='Which classroom is this laptop in?'; $h.FontSize=17; $h.FontWeight='Bold'; $h.Margin='0,0,0,12'; [void]$g.Children.Add($h); " +
+    "$g=New-Object System.Windows.Controls.StackPanel; $g.Margin='18'; $g.MinWidth=420; " +
+    "$h=New-Object System.Windows.Controls.TextBlock; $h.Text='Set up this laptop'; $h.FontSize=18; $h.FontWeight='Bold'; $h.Margin='0,0,0,2'; [void]$g.Children.Add($h); " +
+    "$sub=New-Object System.Windows.Controls.TextBlock; $sub.Text='Enter the student''s name so the instructor knows whose laptop this is. You can change it later from the dashboard.'; $sub.Foreground='#5f6a55'; $sub.Margin='0,0,0,10'; $sub.TextWrapping='Wrap'; [void]$g.Children.Add($sub); " +
     "function Field($lbl,$val){ $t=New-Object System.Windows.Controls.TextBlock; $t.Text=$lbl; $t.Margin='0,8,0,2'; [void]$g.Children.Add($t); $b=New-Object System.Windows.Controls.TextBox; $b.Text=$val; $b.Padding='5'; $b.FontSize=14; [void]$g.Children.Add($b); return $b }; " +
-    "$dev=Field 'Computer / student name (shown on the monitor)' '" + esc(cfg.device) + "'; " +
+    "$dev=Field 'Student name (shown on the monitor) *' '" + esc(cfg.name) + "'; $dev.FontWeight='Bold'; " +
     "$srv=Field 'Hub server (auto-detected; edit if needed)' '" + esc(cfg.server) + "'; " +
     "$loc=Field 'Location / campus' '" + esc(cfg.location) + "'; " +
     "$bld=Field 'Building' '" + esc(cfg.building) + "'; " +
-    "$ok=New-Object System.Windows.Controls.Button; $ok.Content='Start monitoring'; $ok.Margin='0,18,0,0'; $ok.Padding='8'; $ok.FontWeight='Bold'; " +
-    "$ok.Add_Click({ $w.Tag='ok'; $w.Close() }); [void]$g.Children.Add($ok); $w.Content=$g; " +
-    "$dev.Focus() | Out-Null; [void]$w.ShowDialog(); " +
-    "if($w.Tag -eq 'ok'){ @{ device=$dev.Text.Trim(); server=$srv.Text.Trim(); location=$loc.Text.Trim(); building=$bld.Text.Trim() } | ConvertTo-Json -Compress | Write-Output }";
+    "$err=New-Object System.Windows.Controls.TextBlock; $err.Foreground='#d92d20'; $err.Margin='0,8,0,0'; [void]$g.Children.Add($err); " +
+    "$ok=New-Object System.Windows.Controls.Button; $ok.Content='Start monitoring'; $ok.Margin='0,14,0,0'; $ok.Padding='8'; $ok.FontWeight='Bold'; " +
+    // require a name: if blank, prompt for it instead of silently starting
+    "$ok.Add_Click({ if([string]::IsNullOrWhiteSpace($dev.Text)){ $err.Text='Please enter the student''s name.'; $dev.Focus() } else { $w.Tag='ok'; $w.Close() } }); [void]$g.Children.Add($ok); $w.Content=$g; " +
+    "$dev.Focus() | Out-Null; $dev.SelectAll(); [void]$w.ShowDialog(); " +
+    "if($w.Tag -eq 'ok'){ @{ name=$dev.Text.Trim(); server=$srv.Text.Trim(); location=$loc.Text.Trim(); building=$bld.Text.Trim() } | ConvertTo-Json -Compress | Write-Output }";
   try {
     const out = require("child_process").execFileSync(
       "powershell",
@@ -248,9 +277,9 @@ function promptForConfig(cfg) {
       { encoding: "utf8", windowsHide: false, stdio: ["ignore", "pipe", "ignore"] }
     );
     const j = JSON.parse((out || "").trim() || "{}");
-    if (j && (j.server || j.building || j.device)) {
+    if (j && (j.server || j.building || j.name)) {
       log("setup captured from dialog.");
-      return { server: j.server, location: j.location, building: j.building, device: j.device };
+      return { server: j.server, location: j.location, building: j.building, name: j.name };
     }
   } catch (_) {
     /* dialog unavailable — fall back to config/flags */
@@ -272,15 +301,17 @@ async function runLauncher() {
 
   // First run: auto-detect the hub on the LAN, default the device name to the
   // hostname, then (unless headless) pop a small window to confirm/edit — no
-  // PowerShell, no hand-editing config.json per laptop.
-  const needsSetup = !cfg.server || !cfg.building || cfg.building === "Main Building" || !cfg.device;
+  // PowerShell, no hand-editing config.json per laptop. The very first launch
+  // always shows the dialog so whoever sets up the laptop names it (the student).
+  const needsSetup =
+    firstRun || !cfg.server || !cfg.building || cfg.building === "Main Building" || !cfg.name;
   if (needsSetup) {
     if (!cfg.server) {
       log("scanning the network for a hub…");
       cfg.server = (await discoverServer()) || DEFAULT_SERVER;
       log(`prefilled server: ${cfg.server}`);
     }
-    if (!cfg.device) cfg.device = os.hostname();
+    if (!cfg.name) cfg.name = os.hostname(); // pre-fill the dialog with the machine name
     if (process.env.IDT_NO_GUI !== "1") {
       const entered = promptForConfig(cfg);
       if (entered) cfg = Object.assign(cfg, entered);
@@ -301,13 +332,22 @@ async function runLauncher() {
     }
   } else {
     // script mode (signed-runtime package): copy the scripts AND the signed
-    // node.exe into DIR so the install is self-contained after the USB is removed.
-    fs.copyFileSync(__filename, path.join(DIR, "id-tech-watch.js"));
-    try {
-      fs.copyFileSync(path.join(__dirname, "agent.js"), path.join(DIR, "agent.js"));
-    } catch (e) {
-      log(`could not copy agent.js: ${e.message}`);
-    }
+    // node.exe into DIR so the install is self-contained after the USB is
+    // removed. Each copy is guarded and skipped when source==destination —
+    // otherwise the logon re-launch (which runs id-tech-watch.js FROM DIR) would
+    // try to copy the file onto itself, throw EBUSY, and abort before starting
+    // the agent (a cause of "doesn't boot on startup").
+    const copyInto = (src, dstName) => {
+      const dst = path.join(DIR, dstName);
+      try {
+        if (path.resolve(src).toLowerCase() === path.resolve(dst).toLowerCase()) return; // already in place
+        fs.copyFileSync(src, dst);
+      } catch (e) {
+        log(`could not copy ${dstName}: ${e.message}`);
+      }
+    };
+    copyInto(__filename, "id-tech-watch.js");
+    copyInto(path.join(__dirname, "agent.js"), "agent.js");
     try {
       const localNode = path.join(DIR, "node.exe");
       if (IS_WIN && process.execPath.toLowerCase().endsWith("node.exe") && !fs.existsSync(localNode))
@@ -316,6 +356,8 @@ async function runLauncher() {
       log(`could not copy node.exe: ${e.message}`);
     }
   }
+  // Always (re)clone the Start/Stop scripts into the install dir so the package
+  // is self-contained on the client and can be re-launched / auto-started.
   writeStartScript(); // the launcher, cloned into the install dir + startup
   writeStopScript();
   addToStartup();
@@ -356,7 +398,8 @@ function runWorker(role) {
     // run the real monitoring agent in-process
     const cfg = loadConfig();
     const argv = [process.argv[0], "agent", "--server", cfg.server, "--location", cfg.location, "--building", cfg.building, "--keep-awake"];
-    if (cfg.device) argv.push("--device", cfg.device);
+    if (cfg.name) argv.push("--name", cfg.name); // the student/display name shown on the monitor
+    if (cfg.device) argv.push("--device", cfg.device); // optional explicit machine id (normally auto-derived)
     if (cfg.klass) argv.push("--class", cfg.klass);
     if (cfg.token) argv.push("--token", cfg.token);
     process.argv = argv;
