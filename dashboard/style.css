@@ -1226,6 +1226,34 @@ details.apps .procs {
   color: var(--brand-ink);
   font-weight: 700;
 }
+.ver.manual {
+  color: var(--warning, #b8860b);
+}
+:root[data-theme="dark"] .ver.manual {
+  color: #fabd2f;
+}
+.btn.warn-outline {
+  border-color: #fabd2f;
+  color: #b8860b;
+}
+:root[data-theme="dark"] .btn.warn-outline {
+  color: #fabd2f;
+}
+.manual-note {
+  color: #b8860b !important;
+}
+:root[data-theme="dark"] .manual-note {
+  color: #fabd2f !important;
+}
+.help-steps {
+  margin: 6px 0 0;
+  padding-left: 22px;
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+.help-steps li {
+  margin-bottom: 4px;
+}
 .dur-custom-row {
   display: flex;
   gap: 8px;

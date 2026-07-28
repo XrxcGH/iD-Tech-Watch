@@ -1902,6 +1902,28 @@
   }
 
   const isStale = (d) => !!(d.build && D.currentBuild && d.build !== D.currentBuild);
+  // Remote update needs the agent to already understand the `update_agent`
+  // command, which shipped in the build below. Older agents (or ones with no
+  // build stamp at all) must get one manual install first; after that every
+  // future update is one-click. Build stamps start "YYYY-MM-DD …" so the date
+  // prefix compares lexically. Keep the "YYYY-MM-DD " prefix in agent BUILD.
+  const FIRST_REMOTE_UPDATABLE = "2026-07-28";
+  const canRemoteUpdate = (d) => (d.build || "").slice(0, 10) >= FIRST_REMOTE_UPDATABLE;
+  // Explain the one-time manual bootstrap for a laptop on a pre-update agent.
+  function showManualUpdateHelp(d) {
+    const body = el(
+      "div",
+      {},
+      el("p", { class: "modal-msg" }, `“${nameOf(d)}” is running an older agent (${d.build || "unknown version"}) from before remote updates existed, so it can’t be updated from here yet.`),
+      el("p", { class: "modal-msg" }, "Do this once on that laptop — after that, every future update is one click from here:"),
+      el("ol", { class: "help-steps" },
+        el("li", {}, "Download the client with the ⬇ iD-Tech-Watch.zip button (bottom-right)."),
+        el("li", {}, "Unzip it on the laptop and run “Start iD Tech Watch.cmd”."),
+        el("li", {}, "It restarts on the new agent automatically and keeps the computer’s name/server.")),
+      el("p", { class: "modal-hint" }, "You can confirm it worked in C:\\Users\\Student\\projects\\iD-Tech\\watch-client.log (top line shows the build).")
+    );
+    const m = openModal({ title: "One-time manual update needed", body, actions: [el("button", { class: "btn primary", onclick: () => m.close() }, "Got it")], width: "500px" });
+  }
   function adminComputers() {
     const all = deviceList();
     // ---- filters (by building/house + status) ----
@@ -1937,6 +1959,7 @@
         const f = buildingById(d.buildingId);
         const classes = f ? f.b.classes : [];
         const stale = isStale(d);
+        const canRemote = canRemoteUpdate(d);
         const sel = el(
           "select",
           { onchange: (e) => org({ op: "assign", deviceId: d.device_id, classId: e.target.value || null }) },
@@ -1949,23 +1972,34 @@
           placeholder: defaultNameOf(d),
           onchange: (e) => rename(d.device_id, e.target.value.trim()),
         });
-        const updateBtn = el(
-          "button",
-          {
-            class: "btn ghost sm" + (stale ? " primary" : ""),
-            disabled: !d.online,
-            title: d.online ? "Push the latest software and restart this computer (its name/server settings are kept)" : "Computer is offline",
-            onclick: () =>
-              d.online &&
-              modalConfirm(`Update “${nameOf(d)}” to the latest software and restart it now? Its settings (name, server, building) are kept.`, { title: "Update computer", okText: "Update & restart" }).then((ok) => {
-                if (ok) {
-                  updateAgent({ scope: "device", deviceId: d.device_id });
-                  toast(`Pushing update to ${nameOf(d)}…`);
-                }
-              }),
-          },
-          "Update"
-        );
+        let updateBtn;
+        if (!canRemote) {
+          // pre-remote-update agent (old or no build stamp): can't push remotely;
+          // explain the one-time manual bootstrap instead.
+          updateBtn = el(
+            "button",
+            { class: "btn ghost sm warn-outline", title: "This laptop runs an older agent that can't be updated remotely yet — one manual install needed.", onclick: () => showManualUpdateHelp(d) },
+            "How to update"
+          );
+        } else {
+          updateBtn = el(
+            "button",
+            {
+              class: "btn ghost sm" + (stale ? " primary" : ""),
+              disabled: !d.online,
+              title: !d.online ? "Computer is offline" : "Push the latest software and restart this computer (its name/server settings are kept)",
+              onclick: () =>
+                d.online &&
+                modalConfirm(`Update “${nameOf(d)}” to the latest software and restart it now? Its settings (name, server, building) are kept.`, { title: "Update computer", okText: "Update & restart" }).then((ok) => {
+                  if (ok) {
+                    updateAgent({ scope: "device", deviceId: d.device_id });
+                    toast(`Pushing update to ${nameOf(d)}…`);
+                  }
+                }),
+            },
+            "Update"
+          );
+        }
         const removeBtn = el(
           "button",
           {
@@ -1992,7 +2026,7 @@
             el("td", {}, loc ? loc.name : "—"),
             el("td", {}, f ? f.b.name : "—"),
             el("td", {}, el("span", { class: "status " + (d.online ? "on" : "off") }, d.online ? "Online" : agoLabel(d.last_seen))),
-            el("td", {}, el("span", { class: "ver" + (stale ? " stale" : ""), title: d.build || "unknown version" }, d.build ? (stale ? "⬆ outdated" : "up to date") : "—")),
+            el("td", {}, el("span", { class: "ver" + (stale ? " stale" : "") + (!canRemote ? " manual" : ""), title: d.build || "no build stamp (pre-update agent)" }, !canRemote ? "⚠ update manually" : stale ? "⬆ outdated" : "up to date")),
             el("td", {}, sel),
             el("td", { class: "row-actions" }, updateBtn, removeBtn)
           )
@@ -2000,21 +2034,22 @@
       });
     table.append(tbody);
 
-    const staleCount = all.filter((d) => d.online && isStale(d)).length;
+    const staleRemote = all.filter((d) => d.online && isStale(d) && canRemoteUpdate(d)).length;
+    const manualNeeded = all.filter((d) => !canRemoteUpdate(d)).length;
     const updateAllBtn = el(
       "button",
       {
-        class: "btn sm" + (staleCount ? " primary" : ""),
-        title: "Push the latest software to every online computer and restart them (settings kept)",
+        class: "btn sm" + (staleRemote ? " primary" : ""),
+        title: "Push the latest software to every online computer that supports remote update, and restart them (settings kept)",
         onclick: () =>
-          modalConfirm("Push the latest software to ALL online computers and restart them now? Each keeps its own settings (name, server, building).", { title: "Update all computers", okText: "Update all" }).then((ok) => {
+          modalConfirm("Push the latest software to ALL online computers and restart them now? Each keeps its own settings (name, server, building). Older laptops that need a one-time manual install are skipped automatically.", { title: "Update all computers", okText: "Update all" }).then((ok) => {
             if (ok) {
               updateAgent({ scope: "all" });
               toast("Pushing update to all online computers…");
             }
           }),
       },
-      staleCount ? `⬆ Update all (${staleCount} outdated)` : "⬆ Update all"
+      staleRemote ? `⬆ Update all (${staleRemote} outdated)` : "⬆ Update all"
     );
     const actions = el(
       "div",
@@ -2022,6 +2057,7 @@
       buildingSel,
       statusSel,
       el("span", { class: "muted small" }, `${onlineCount(devs)}/${devs.length} shown`),
+      manualNeeded ? el("span", { class: "muted small manual-note", title: "These run an older agent from before remote updates — install once manually, then they update from here." }, `⚠ ${manualNeeded} need a one-time manual install`) : null,
       auth && auth.role === "admin" ? updateAllBtn : null
     );
     return section("Computers", table, actions);
