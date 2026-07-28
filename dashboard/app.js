@@ -195,6 +195,7 @@
   let ws = null;
   let lastAdminSig = "";
   let lastMonitorSig = ""; // gates monitor re-renders to real content changes
+  let liveView = null; // { deviceId, img, wrap } — on-demand screen view in the open panel
   let lastPaintSig = "";
   let paintAnimate = false; // only animate on a real navigation, not live re-renders
 
@@ -308,7 +309,13 @@
         }
         onState();
       } else if (msg.type === "ack") {
-        toast(`Command sent to ${msg.sent} computer(s).`);
+        // block-menu acks are noisy; skip the toast for the screenshot handshake
+        if (msg.action !== "start_screenshot" && msg.action !== "stop_screenshot") toast(`Command sent to ${msg.sent} computer(s).`);
+      } else if (msg.type === "screenshot_frame") {
+        if (liveView && msg.device_id === liveView.deviceId && liveView.img) {
+          liveView.img.src = "data:image/jpeg;base64," + msg.data;
+          liveView.wrap.classList.add("streaming");
+        }
       } else if (msg.type === "exec_result") {
         showExecResult(msg);
       } else if (msg.type === "error") {
@@ -664,6 +671,7 @@
       devs: deviceList().map((d) => [
         d.device_id, d.online ? 1 : 0, nameOf(d), d.os, d.locationId, d.buildingId, d.classId,
         (d.windows || []).join("|"),
+        d.activeWindow || "",
         (d.processes || []).length,
         (d.blocked || []).map((b) => b.pattern).sort().join(","),
         (d.blockedSites || []).map((b) => b.domain).sort().join(","),
@@ -1277,10 +1285,34 @@
     return o;
   }
   function closeOverlay() {
+    stopLiveView();
     const o = document.getElementById("overlay");
     if (o) {
       o.classList.remove("open");
       o.innerHTML = "";
+    }
+  }
+  // On-demand live screen view (only while this one computer's panel is open).
+  function startLiveView(d) {
+    stopLiveView();
+    if (DEMO) return null; // demo has no real agents
+    const img = el("img", { class: "live-img", alt: "live screen" });
+    const wrap = el(
+      "div",
+      { class: "live-view" },
+      el("div", { class: "live-badge" }, el("span", { class: "live-dot" }), "LIVE"),
+      img,
+      el("div", { class: "live-hint" }, "Live screen — only while this panel is open (~1 fps)")
+    );
+    liveView = { deviceId: d.device_id, img, wrap };
+    if (d.online) command({ scope: "device", deviceId: d.device_id }, "start_screenshot", {});
+    return wrap;
+  }
+  function stopLiveView() {
+    if (liveView) {
+      const id = liveView.deviceId;
+      liveView = null;
+      if (!DEMO) command({ scope: "device", deviceId: id }, "stop_screenshot", {});
     }
   }
   function openDevicePanel(d) {
@@ -1305,6 +1337,10 @@
       el("div", { class: "sheet-sub" }, `${nameOf(d) !== d.hostname ? d.hostname + " · " : ""}${(d.windows || []).length} open window(s) · ${(d.processes || []).length} apps · ${d.online ? "online" : "offline"}`)
     );
 
+    // live screen thumbnail (on-demand — starts now, stops when the panel closes)
+    const lv = startLiveView(d);
+    if (lv) sheet.append(lv);
+
     if ((d.blocked || []).length || (d.blockedSites || []).length) {
       const chips = el("div", { class: "chips" });
       (d.blocked || []).forEach((b) => chips.append(blockChip("⛔", b.pattern, b.expires_at)));
@@ -1314,7 +1350,7 @@
 
     if ((d.windows || []).length) {
       const list = el("div", { class: "list windows" });
-      d.windows.forEach((w) => list.append(el("div", { class: "row" }, w)));
+      d.windows.forEach((w) => list.append(el("div", { class: "row" + (d.activeWindow && w === d.activeWindow ? " active-win" : "") }, w)));
       sheet.append(el("div", { class: "list-wrap" }, el("div", { class: "list-title" }, "Open windows"), list));
     }
 
@@ -1380,7 +1416,7 @@
     }
 
     const winList = trackScroll(el("div", { class: "list windows" }), d.device_id + ":win");
-    if (d.windows && d.windows.length) d.windows.forEach((w) => winList.append(el("div", { class: "row" }, w)));
+    if (d.windows && d.windows.length) d.windows.forEach((w) => winList.append(el("div", { class: "row" + (d.activeWindow && w === d.activeWindow ? " active-win" : "") }, w)));
     else winList.append(el("div", { class: "row muted" }, d.online ? "—" : "offline"));
     card.append(
       el("div", { class: "list-wrap" }, el("div", { class: "list-title" }, `Open windows (${(d.windows || []).length})`), winList)

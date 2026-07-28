@@ -319,6 +319,7 @@ const devices = new Map(); // deviceId -> record
 const agentWs = new Map(); // deviceId -> WSConn
 const wsDevice = new Map(); // WSConn -> deviceId
 const dashboards = new Set(); // authenticated WSConns { role }
+const screenshotViewers = new Map(); // deviceId -> Set<dashboard WSConn> currently viewing its live screen
 
 function registerAgent(ws, info) {
   const deviceId = String(info.device_id || `unknown-${Date.now()}`);
@@ -353,6 +354,7 @@ function registerAgent(ws, info) {
     online: true,
     last_seen: Date.now() / 1000,
     windows: prev.windows || [],
+    activeWindow: prev.activeWindow || "",
     processes: prev.processes || [],
     blocked: prev.blocked || [],
     blockedSites: prev.blockedSites || [],
@@ -406,7 +408,7 @@ function updateDevice(ws, data) {
   const deviceId = wsDevice.get(ws);
   const rec = deviceId && devices.get(deviceId);
   if (!rec) return null;
-  for (const key of ["windows", "processes", "blocked", "blockedSites", "sitesAvailable"])
+  for (const key of ["windows", "activeWindow", "processes", "blocked", "blockedSites", "sitesAvailable"])
     if (key in data) rec[key] = data[key];
   rec.online = true;
   rec.last_seen = Date.now() / 1000;
@@ -491,6 +493,7 @@ function devicesView() {
       online: rec.online,
       last_seen: rec.last_seen,
       windows: rec.windows,
+      activeWindow: rec.activeWindow || "",
       processes: rec.processes,
       blocked: rec.blocked,
       blockedSites: rec.blockedSites || [],
@@ -746,6 +749,18 @@ function handleAgent(ws) {
       let fwd = 0;
       for (const dws of [...dashboards]) if (!dws.closed && dws.role === "admin") { dws.sendJSON(out); fwd++; }
       console.log(`[hub] exec_result from ${deviceId} -> forwarded to ${fwd} admin dashboard(s)`);
+    } else if (msg.type === "screenshot_frame") {
+      // a live screen frame — relay only to the dashboard(s) currently viewing
+      // this device's panel (on-demand; no broadcast, no storage).
+      const deviceId = wsDevice.get(ws);
+      const viewers = deviceId && screenshotViewers.get(deviceId);
+      if (viewers && viewers.size) {
+        const frame = { type: "screenshot_frame", device_id: deviceId, data: String(msg.data || "") };
+        for (const dws of [...viewers]) {
+          if (dws.closed) viewers.delete(dws);
+          else dws.sendJSON(frame);
+        }
+      }
     }
   };
   ws.onclose = () => {
@@ -789,6 +804,29 @@ function handleDashboard(ws) {
         ws.sendJSON({ type: "error", detail: "admin required to run commands" });
         return;
       }
+      // On-demand live screen view: track which dashboard is viewing which device
+      // so we can relay frames to it and only stop the agent's capture when the
+      // last viewer leaves (never leave a laptop capturing with nobody watching).
+      const target = msg.target || {};
+      if (msg.action === "start_screenshot" && target.scope === "device" && target.deviceId) {
+        let set = screenshotViewers.get(target.deviceId);
+        if (!set) screenshotViewers.set(target.deviceId, (set = new Set()));
+        set.add(ws);
+        ws.sendJSON({ type: "ack", action: msg.action, sent: sendCommand(target, msg.action, msg.params) });
+        return;
+      }
+      if (msg.action === "stop_screenshot" && target.scope === "device" && target.deviceId) {
+        const set = screenshotViewers.get(target.deviceId);
+        if (set) {
+          set.delete(ws);
+          if (!set.size) {
+            screenshotViewers.delete(target.deviceId);
+            sendCommand(target, "stop_screenshot", {}); // last viewer gone → stop capture
+          }
+        }
+        ws.sendJSON({ type: "ack", action: msg.action, sent: 1 });
+        return;
+      }
       const sent = sendCommand(msg.target || {}, msg.action, msg.params);
       ws.sendJSON({ type: "ack", action: msg.action, sent });
     } else if (msg.type === "org") {
@@ -819,7 +857,17 @@ function handleDashboard(ws) {
       broadcastState();
     }
   };
-  ws.onclose = () => dashboards.delete(ws);
+  ws.onclose = () => {
+    dashboards.delete(ws);
+    // if this dashboard was watching any live screens, drop it and stop the
+    // agent's capture wherever it was the last viewer.
+    for (const [deviceId, set] of screenshotViewers) {
+      if (set.delete(ws) && !set.size) {
+        screenshotViewers.delete(deviceId);
+        sendCommand({ scope: "device", deviceId }, "stop_screenshot", {});
+      }
+    }
+  };
 }
 
 // ==========================================================================
