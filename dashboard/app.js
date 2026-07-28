@@ -168,7 +168,7 @@
   // ------------------------------------------------------------------ state
   const D = { org: [], devices: {}, layouts: {}, schedules: [], instructorCodeRequired: false };
   const nav = { view: "login", locationId: null, buildingId: null, classId: null };
-  const ui = { blockDurationSec: 60, loginRole: "instructor", connected: false, monitorMode: "grid", dragging: null, unlocked: {}, expandedProcs: new Set(), classSort: "room", scroll: {}, lastScrollAt: 0, theme: localStorage.getItem("idt_theme") || "dark" };
+  const ui = { blockDurationSec: 60, loginRole: "instructor", connected: false, monitorMode: "grid", dragging: null, seatLocked: true, unlocked: {}, expandedProcs: new Set(), classSort: "room", scroll: {}, lastScrollAt: 0, theme: localStorage.getItem("idt_theme") || "dark" };
 
   function applyTheme() {
     document.documentElement.dataset.theme = ui.theme;
@@ -401,13 +401,49 @@
   // ---- blocking helpers (dispatch(action, params) sends to the right target) ----
   // Global "Block for" duration control (used in the top bar so it's always
   // visible and applies to every block — class, device, seating, or the menu).
+  // Human label for a duration in seconds.
+  function fmtDur(sec) {
+    if (!sec) return "Until lifted";
+    if (sec < 60) return `${sec} sec`;
+    if (sec % 3600 === 0) return `${sec / 3600} hour${sec / 3600 > 1 ? "s" : ""}`;
+    if (sec % 60 === 0) return `${sec / 60} min`;
+    return `${Math.floor(sec / 60)} min ${sec % 60} sec`;
+  }
+  // Custom-duration modal: a number + a unit (seconds / minutes / hours).
+  function promptCustomDuration() {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (v) => { if (done) return; done = true; m.close(); resolve(v); };
+      const num = el("input", { class: "modal-input", type: "number", min: "0", step: "1", value: "5" });
+      const unit = el(
+        "select",
+        { class: "modal-input" },
+        el("option", { value: "1" }, "seconds"),
+        el("option", { value: "60", selected: true }, "minutes"),
+        el("option", { value: "3600" }, "hours")
+      );
+      const ok = el("button", { class: "btn primary", onclick: () => {
+        const n = parseFloat(num.value);
+        finish(!Number.isNaN(n) && n >= 0 ? Math.round(n * parseInt(unit.value, 10)) : null);
+      } }, "Set");
+      const cancel = el("button", { class: "btn ghost", onclick: () => finish(null) }, "Cancel");
+      const m = openModal({
+        title: "Custom block duration",
+        body: el("div", {}, el("label", { class: "modal-label" }, "Block for"), el("div", { class: "dur-custom-row" }, num, unit), el("div", { class: "modal-hint" }, "Enter 0 to block until you lift it.")),
+        actions: [cancel, ok],
+        onClose: () => finish(null),
+        width: "420px",
+      });
+      num.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); ok.click(); } });
+      setTimeout(() => { num.focus(); num.select && num.select(); }, 30);
+    });
+  }
   function durationControl() {
     const DUR_OPTS = [
-      [60, "1 min"], [120, "2 min"], [300, "5 min"], [600, "10 min"],
+      [30, "30 sec"], [60, "1 min"], [120, "2 min"], [300, "5 min"], [600, "10 min"],
       [900, "15 min"], [1800, "30 min"], [3600, "1 hour"], [0, "Until lifted"],
     ];
     const inSet = DUR_OPTS.some(([v]) => v === ui.blockDurationSec);
-    const label = ui.blockDurationSec ? `${Math.round(ui.blockDurationSec / 60)} min` : "Until lifted";
     return el(
       "label",
       { class: "dur" },
@@ -418,11 +454,8 @@
           class: "dur-select",
           onchange: (e) => {
             if (e.target.value === "custom") {
-              modalPrompt({ title: "Custom block duration", label: "Block for how many minutes?", value: "5", hint: "0 = until I lift it", okText: "Set" }).then((m) => {
-                if (m !== null) {
-                  const mins = parseInt(m, 10);
-                  if (!Number.isNaN(mins) && mins >= 0) ui.blockDurationSec = mins * 60;
-                }
+              promptCustomDuration().then((sec) => {
+                if (sec !== null) ui.blockDurationSec = sec;
                 render();
               });
               return;
@@ -432,7 +465,7 @@
           },
         },
         ...DUR_OPTS.map(([v, t]) => el("option", { value: v, selected: v === ui.blockDurationSec }, t)),
-        !inSet ? el("option", { value: ui.blockDurationSec, selected: true }, label) : null,
+        !inSet ? el("option", { value: ui.blockDurationSec, selected: true }, fmtDur(ui.blockDurationSec)) : null,
         el("option", { value: "custom" }, "Custom…")
       )
     );
@@ -531,13 +564,7 @@
       modalConfirm("Close ALL browser windows now? This closes every open tab on the target computer(s).", { title: "Close all browsers", danger: true, okText: "Close browsers" }).then((ok) => {
         if (ok) dispatch("close_browsers", {});
       });
-    const sendKeysItem = () =>
-      modalPrompt({ title: "Send a keyboard shortcut", label: "Keys to press on the front window", value: "ctrl+w", placeholder: "e.g. win+d, alt+F4, ctrl+shift+t", hint: "Combine with +. Modifiers: ctrl, alt, shift, win.", okText: "Press" }).then((keys) => {
-        if (keys && keys.trim()) {
-          dispatch("send_keys", { keys: keys.trim() });
-          toast(`Pressing ${keys.trim()}.`);
-        }
-      });
+    const sendKeysItem = () => openSendKeys(dispatch);
     const runCmdItem = () =>
       modalPrompt({ title: "Run a command", label: "Command to run (cmd.exe) on the target computer(s)", placeholder: "e.g. ipconfig /all", hint: "Admin only. The client must be started with IDT_ALLOW_EXEC=1. Output is returned to you.", okText: "Run", danger: true }).then((cmd) => {
         if (cmd && cmd.trim()) {
@@ -1166,14 +1193,24 @@
     devices.forEach((d, i) => room.append(seatNode(d, getPos(layoutKey, d, i, total), layoutKey)));
     if (!total) room.append(el("div", { class: "room-empty" }, "No computers here yet."));
 
+    const lockBtn = el(
+      "button",
+      {
+        class: "btn sm lock-btn" + (ui.seatLocked ? " locked" : ""),
+        title: ui.seatLocked ? "Locked — click to unlock and rearrange" : "Unlocked — drag to arrange. Click to lock.",
+        onclick: () => { ui.seatLocked = !ui.seatLocked; render(); },
+      },
+      ui.seatLocked ? "🔒 Locked" : "🔓 Unlocked"
+    );
     const bar = el(
       "div",
       { class: "canvas-bar" },
-      el("span", { class: "muted small" }, "Drag each computer to match where the student sits. Tap one to control it."),
+      el("span", { class: "muted small" }, ui.seatLocked ? "Positions are locked. Tap a computer to control it." : "Drag each computer to where the student sits. Tap one to control it."),
       el("span", { class: "spacer" }),
-      el("button", { class: "btn ghost sm", onclick: () => resetLayout(layoutKey) }, "Reset layout")
+      lockBtn,
+      el("button", { class: "btn ghost sm", disabled: ui.seatLocked, title: ui.seatLocked ? "Unlock first" : "", onclick: () => { if (!ui.seatLocked) resetLayout(layoutKey); } }, "Reset layout")
     );
-    return el("div", { class: "room-wrap" }, bar, room);
+    return el("div", { class: "room-wrap" + (ui.seatLocked ? " locked" : "") }, bar, room);
   }
 
   function seatNode(d, pos, layoutKey) {
@@ -1197,12 +1234,16 @@
       try {
         node.setPointerCapture(e.pointerId);
       } catch (_) {}
+      // still record the press so a tap opens the panel; only enable dragging
+      // when the canvas is unlocked (the lock prevents accidental moves).
       start = { px: e.clientX, py: e.clientY, moved: false, x: pos.x, y: pos.y, room: node.parentElement.getBoundingClientRect() };
-      ui.dragging = { deviceId: d.device_id };
-      node.classList.add("dragging");
+      if (!ui.seatLocked) {
+        ui.dragging = { deviceId: d.device_id };
+        node.classList.add("dragging");
+      }
     });
     node.addEventListener("pointermove", (e) => {
-      if (!start) return;
+      if (!start || ui.seatLocked) return;
       const rawX = (e.clientX - start.room.left) / start.room.width;
       const rawY = (e.clientY - start.room.top) / start.room.height;
       const s = snapPos(rawX, rawY); // snap to grid for a clean, aligned look
@@ -1289,6 +1330,7 @@
         el("button", { class: "btn sm", onclick: () => command(t, "resume", {}) }, "▶ Resume"),
         el("button", { class: "btn sm", onclick: () => command(t, "close_tab", {}) }, "Close tab"),
         el("button", { class: "btn sm", onclick: () => command(t, "minimize_all", {}) }, "Minimize"),
+        el("button", { class: "btn sm", onclick: () => openSendKeys(dispatch) }, "⌨ Keys…"),
         el("button", { class: "btn sm", onclick: () => promptMessage(t) }, "✉ Message / Lock…"),
         el("button", { class: "btn sm ghost", onclick: () => command(t, "list_now", {}) }, "Refresh")
       )
@@ -1370,6 +1412,7 @@
         el("button", { class: "btn sm", onclick: () => command(t, "resume", {}) }, "▶ Resume"),
         el("button", { class: "btn sm", onclick: () => command(t, "close_tab", {}) }, "Close tab"),
         el("button", { class: "btn sm", onclick: () => command(t, "minimize_all", {}) }, "Minimize"),
+        el("button", { class: "btn sm", onclick: () => openSendKeys(dispatch) }, "⌨ Keys…"),
         el("button", { class: "btn sm", onclick: () => promptMessage(t) }, "✉ Message / Lock…"),
         el("button", { class: "btn sm ghost", onclick: () => command(t, "list_now", {}) }, "Refresh")
       )
@@ -1385,6 +1428,24 @@
       okText: "Close app",
     });
     if (n && n.trim()) command(t, "kill_process", { pattern: n.trim() });
+  }
+
+  // Send a keyboard shortcut to the target's foreground window. Surfaced as a
+  // first-class control (⌨ Keys…), not just an item buried in the Block menu.
+  function openSendKeys(dispatch) {
+    modalPrompt({
+      title: "Send a keyboard shortcut",
+      label: "Keys to press on the front window",
+      value: "ctrl+w",
+      placeholder: "e.g. win+d, alt+F4, ctrl+shift+t, enter",
+      hint: "Combine with +. Modifiers: ctrl, alt, shift, win. Also: enter, esc, tab, F1–F12, arrows.",
+      okText: "Press",
+    }).then((keys) => {
+      if (keys && keys.trim()) {
+        dispatch("send_keys", { keys: keys.trim() });
+        toast(`Pressing ${keys.trim()}.`);
+      }
+    });
   }
 
   // Unified "Send to screen(s)" composer — combines the old Message… and
