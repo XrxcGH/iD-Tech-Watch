@@ -494,6 +494,8 @@ async function handleCommand(ws, msg) {
     stopScreenshot();
   } else if (action === "stop_watch") {
     stopWatch();
+  } else if (action === "update_agent") {
+    updateAgent(ws, p.files, p.build);
   } else if (action === "pause") {
     pauseScreen(p.text, p.duration_sec);
   } else if (action === "resume") {
@@ -844,6 +846,64 @@ function stopWatch() {
   setTimeout(() => cleanupAndExit(0), 800); // let the log flush, then drop off
 }
 
+// Remote software update: the hub (admin) pushes the latest agent.js / watch.js
+// source; we write them into the install dir (leaving watch-config.json — device
+// name/server/building — untouched) and re-launch on the new code. No per-laptop
+// reinstall. Each incoming file is syntax-checked BEFORE it replaces the running
+// copy, and the old copy is backed up (.bak), so a bad push can't brick a laptop.
+function updateAgent(ws, files, build) {
+  const dir = process.env.IDT_WATCH_DIR || "C:\\Users\\Student\\projects\\iD-Tech";
+  // incoming file name -> destination file name in the install dir
+  const dstFor = { "agent.js": "agent.js", "id-tech-watch.js": "id-tech-watch.js", "watch.js": "id-tech-watch.js" };
+  const wrote = [];
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    for (const [name, content] of Object.entries(files || {})) {
+      const dstName = dstFor[name];
+      if (!dstName || typeof content !== "string" || content.length < 500) {
+        log(`update_agent: skipping ${name} (unknown/too small)`);
+        continue;
+      }
+      // syntax-check before overwriting (strip a leading shebang; new Function
+      // parses without executing — a syntax error throws and we abort this file).
+      try {
+        new Function(content.replace(/^#![^\n]*\n/, ""));
+      } catch (e) {
+        throw new Error(`${name} failed syntax check: ${e.message}`);
+      }
+      const dst = path.join(dir, dstName);
+      try {
+        if (fs.existsSync(dst)) fs.copyFileSync(dst, dst + ".bak");
+      } catch (_) {}
+      fs.writeFileSync(dst, content);
+      wrote.push(dstName);
+    }
+    log(`update_agent: wrote ${wrote.join(", ") || "(nothing)"}${build ? ` (build ${build})` : ""}; relaunching…`);
+    try {
+      ws.send(JSON.stringify({ type: "update_result", ok: true, wrote, build: build || "" }));
+    } catch (_) {}
+    // Re-launch via the installed launcher, which clean-restarts BOTH workers on
+    // the fresh code (it stop-flags the old pair, waits, then starts new ones).
+    const launcher = path.join(dir, "id-tech-watch.js");
+    if (wrote.length && fs.existsSync(launcher)) {
+      setTimeout(() => {
+        try {
+          spawn(process.execPath, [launcher], { cwd: dir, detached: true, stdio: "ignore", windowsHide: true }).unref();
+        } catch (e) {
+          log(`update_agent: relaunch failed: ${e.message}`);
+        }
+      }, 700);
+    } else if (wrote.length) {
+      log("update_agent: no launcher in install dir — new code loads on next restart.");
+    }
+  } catch (e) {
+    log(`update_agent FAILED (kept current version): ${e.message}`);
+    try {
+      ws.send(JSON.stringify({ type: "update_result", ok: false, error: e.message }));
+    } catch (_) {}
+  }
+}
+
 process.on("exit", () => {
   cleanupHosts();
   killHelpers();
@@ -928,6 +988,7 @@ function main() {
           device_id: deviceId,
           hostname: os.hostname(),
           name: args.name || "", // student/display name (seeds the dashboard name)
+          build: BUILD, // which agent version this laptop is running (for remote updates)
           os: osName(),
           location: args.location,
           building: args.building,

@@ -302,6 +302,7 @@
         D.devices = msg.devices;
         D.layouts = msg.layouts || {};
         D.schedules = msg.schedules || [];
+        D.currentBuild = msg.currentBuild || "";
         D.instructorCodeRequired = msg.instructorCodeRequired;
         if (!deepLinkDone) {
           deepLinkDone = true;
@@ -318,6 +319,8 @@
         }
       } else if (msg.type === "exec_result") {
         showExecResult(msg);
+      } else if (msg.type === "update_result") {
+        toast(msg.ok ? `${msg.name}: updated (${(msg.wrote || []).join(", ") || "no files"}) — restarting.` : `${msg.name}: update failed — ${msg.error}`);
       } else if (msg.type === "error") {
         toast(msg.detail || "Error");
       }
@@ -344,6 +347,7 @@
   const classrule = (op) => send(Object.assign({ type: "classrule" }, op));
   const rename = (deviceId, name) => send({ type: "rename", deviceId, name });
   const removeDevice = (deviceId) => send({ type: "removeDevice", deviceId });
+  const updateAgent = (target) => send({ type: "updateAgent", target });
   // display name priority: dashboard rename (customName) → the name entered at
   // setup (agentName) → the machine hostname.
   const nameOf = (d) =>
@@ -623,8 +627,11 @@
         d.locationId,
         d.buildingId,
         d.classId,
+        d.online ? 1 : 0,
+        d.build || "",
       ]),
       sched: D.schedules,
+      curBuild: D.currentBuild,
       code: D.instructorCodeRequired,
     });
   }
@@ -1894,20 +1901,42 @@
     return section("Organization", body);
   }
 
+  const isStale = (d) => !!(d.build && D.currentBuild && d.build !== D.currentBuild);
   function adminComputers() {
-    const devs = deviceList();
+    const all = deviceList();
+    // ---- filters (by building/house + status) ----
+    const flt = (ui.adminDevFilter ||= { building: "", status: "" });
+    const buildingsFlat = D.org.flatMap((l) => l.buildings.map((b) => ({ id: b.id, name: b.name, loc: l.name })));
+    const buildingSel = el(
+      "select",
+      { class: "filter-sel", onchange: (e) => { flt.building = e.target.value; render(); } },
+      el("option", { value: "", selected: !flt.building }, "All houses/buildings"),
+      ...buildingsFlat.map((b) => el("option", { value: b.id, selected: flt.building === b.id }, buildingsFlat.length && D.org.length > 1 ? `${b.loc} · ${b.name}` : b.name))
+    );
+    const statusSel = el(
+      "select",
+      { class: "filter-sel", onchange: (e) => { flt.status = e.target.value; render(); } },
+      ...[["", "All statuses"], ["online", "Online only"], ["offline", "Offline only"], ["stale", "Outdated only"]].map(([v, t]) => el("option", { value: v, selected: flt.status === v }, t))
+    );
+    let devs = all.slice();
+    if (flt.building) devs = devs.filter((d) => d.buildingId === flt.building);
+    if (flt.status === "online") devs = devs.filter((d) => d.online);
+    else if (flt.status === "offline") devs = devs.filter((d) => !d.online);
+    else if (flt.status === "stale") devs = devs.filter(isStale);
+
     const table = el("table", { class: "dev-table" });
     table.append(
-      el("thead", {}, el("tr", {}, el("th", {}, "Computer"), el("th", {}, "Location"), el("th", {}, "Building"), el("th", {}, "Status"), el("th", {}, "Assigned class"), el("th", {}, "")))
+      el("thead", {}, el("tr", {}, el("th", {}, "Computer"), el("th", {}, "Location"), el("th", {}, "Building"), el("th", {}, "Status"), el("th", {}, "Version"), el("th", {}, "Assigned class"), el("th", {}, "")))
     );
     const tbody = el("tbody", {});
-    if (!devs.length) tbody.append(el("tr", {}, el("td", { colspan: "6", class: "empty" }, "No computers have checked in yet.")));
+    if (!devs.length) tbody.append(el("tr", {}, el("td", { colspan: "7", class: "empty" }, all.length ? "No computers match the filter." : "No computers have checked in yet.")));
     devs
       .sort((a, b) => nameOf(a).toLowerCase().localeCompare(nameOf(b).toLowerCase()))
       .forEach((d) => {
         const loc = locationById(d.locationId);
         const f = buildingById(d.buildingId);
         const classes = f ? f.b.classes : [];
+        const stale = isStale(d);
         const sel = el(
           "select",
           { onchange: (e) => org({ op: "assign", deviceId: d.device_id, classId: e.target.value || null }) },
@@ -1920,6 +1949,23 @@
           placeholder: defaultNameOf(d),
           onchange: (e) => rename(d.device_id, e.target.value.trim()),
         });
+        const updateBtn = el(
+          "button",
+          {
+            class: "btn ghost sm" + (stale ? " primary" : ""),
+            disabled: !d.online,
+            title: d.online ? "Push the latest software and restart this computer (its name/server settings are kept)" : "Computer is offline",
+            onclick: () =>
+              d.online &&
+              modalConfirm(`Update “${nameOf(d)}” to the latest software and restart it now? Its settings (name, server, building) are kept.`, { title: "Update computer", okText: "Update & restart" }).then((ok) => {
+                if (ok) {
+                  updateAgent({ scope: "device", deviceId: d.device_id });
+                  toast(`Pushing update to ${nameOf(d)}…`);
+                }
+              }),
+          },
+          "Update"
+        );
         const removeBtn = el(
           "button",
           {
@@ -1946,13 +1992,39 @@
             el("td", {}, loc ? loc.name : "—"),
             el("td", {}, f ? f.b.name : "—"),
             el("td", {}, el("span", { class: "status " + (d.online ? "on" : "off") }, d.online ? "Online" : agoLabel(d.last_seen))),
+            el("td", {}, el("span", { class: "ver" + (stale ? " stale" : ""), title: d.build || "unknown version" }, d.build ? (stale ? "⬆ outdated" : "up to date") : "—")),
             el("td", {}, sel),
-            el("td", { class: "row-actions" }, removeBtn)
+            el("td", { class: "row-actions" }, updateBtn, removeBtn)
           )
         );
       });
     table.append(tbody);
-    return section("Computers", table, el("span", { class: "muted small" }, `${onlineCount(devs)}/${devs.length} online`));
+
+    const staleCount = all.filter((d) => d.online && isStale(d)).length;
+    const updateAllBtn = el(
+      "button",
+      {
+        class: "btn sm" + (staleCount ? " primary" : ""),
+        title: "Push the latest software to every online computer and restart them (settings kept)",
+        onclick: () =>
+          modalConfirm("Push the latest software to ALL online computers and restart them now? Each keeps its own settings (name, server, building).", { title: "Update all computers", okText: "Update all" }).then((ok) => {
+            if (ok) {
+              updateAgent({ scope: "all" });
+              toast("Pushing update to all online computers…");
+            }
+          }),
+      },
+      staleCount ? `⬆ Update all (${staleCount} outdated)` : "⬆ Update all"
+    );
+    const actions = el(
+      "div",
+      { class: "dev-filters" },
+      buildingSel,
+      statusSel,
+      el("span", { class: "muted small" }, `${onlineCount(devs)}/${devs.length} shown`),
+      auth && auth.role === "admin" ? updateAllBtn : null
+    );
+    return section("Computers", table, actions);
   }
 
   function adminSettings() {
