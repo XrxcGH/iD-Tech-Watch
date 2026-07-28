@@ -299,11 +299,13 @@ hub, and pass `--token <same value>` to each agent.
 ## Message protocol (WebSocket JSON)
 
 **Agent → Hub:** `register` (device_id, hostname, **name** (student/display name),
-os, location, building, klass?, token) · `status` (windows, **activeWindow** (the
-foreground window's title, highlighted in the instructor's list), processes,
-blocked, blockedSites, sitesAvailable) · `exec_result` (result of a `run_command`,
-relayed to admin dashboards) · `screenshot_frame` (a base64 JPEG live-screen frame,
-relayed only to the dashboard viewing that computer). The `device_id` is a stable
+**build** (agent version, so the hub can flag outdated laptops), os, location,
+building, klass?, token) · `status` (windows, **activeWindow** (the foreground
+window's title, highlighted in the instructor's list), processes, blocked,
+blockedSites, sitesAvailable) · `exec_result` (result of a `run_command`, relayed
+to admin dashboards) · `screenshot_frame` (a base64 JPEG live-screen frame, relayed
+only to the dashboard viewing that computer) · `update_result` (outcome of a remote
+software update). The `device_id` is a stable
 machine id (derived from hostname+MAC, or an explicit `--device`); `name` is the
 editable display name and seeds the dashboard's per-device name (a dashboard rename
 overrides it).
@@ -326,7 +328,13 @@ helper never steals the browser's focus. `start_screenshot`/`stop_screenshot` be
 and end an **on-demand** ~1 fps low-res (≈640px) JPEG screen stream — the hub starts
 it only while an instructor has that one computer's panel open and stops it (last
 viewer leaves) so nothing is captured in the background; set `IDT_ALLOW_SCREENSHOT=0`
-on the agent to disable it entirely.
+on the agent to disable it entirely. `update_agent` (admin-only) carries the hub's
+current `agent.js`/`watch.js` source; the agent **syntax-checks each file, backs up
+the old copy, writes the new one (leaving `watch-config.json` — device name/server
+— untouched), and re-launches on the new code** — a remote update with no per-laptop
+reinstall. A bad push is refused (kept the running version). The **Computers** admin
+table shows each laptop's version and an **Update** button (plus "Update all"); the
+hub compares each agent's `build` against its own to flag outdated laptops.
 `send_keys` presses a `keys` combo (`"win+d"`, `"ctrl+w"`, `"alt+F4"`, …) on the
 front window via `keybd_event`. `run_command` runs a shell `command` — it is
 **admin-only** (hub-enforced) and each agent ignores it unless started with

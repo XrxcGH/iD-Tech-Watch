@@ -40,6 +40,18 @@ const CONFIG_PATH = process.env.IDT_CONFIG_PATH || path.join(DATA_DIR, "config.j
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
+// The build stamp of the agent source this hub would push on "Update" — read
+// once at startup so the dashboard can flag laptops running an older version.
+const CURRENT_BUILD = (() => {
+  try {
+    const src = fs.readFileSync(path.join(__dirname, "..", "agent", "agent.js"), "utf8");
+    const m = /const BUILD = "([^"]*)"/.exec(src);
+    return m ? m[1] : "";
+  } catch (_) {
+    return "";
+  }
+})();
+
 // ==========================================================================
 // Persistent config (org tree + assignments + auth)
 // ==========================================================================
@@ -348,6 +360,7 @@ function registerAgent(ws, info) {
     // display name entered at setup — seeds what shows on the monitor. A
     // dashboard rename (deviceNames) overrides it; this is just the default.
     agentName: (info.name != null ? String(info.name).trim().slice(0, 40) : "") || prev.agentName || "",
+    build: (info.build != null ? String(info.build).slice(0, 80) : "") || prev.build || "",
     os: info.os || "unknown",
     locationId,
     buildingId,
@@ -486,6 +499,7 @@ function devicesView() {
       hostname: rec.hostname,
       customName: config.deviceNames[rec.device_id] || "",
       agentName: rec.agentName || "",
+      build: rec.build || "",
       os: rec.os,
       locationId: rec.locationId,
       buildingId: rec.buildingId,
@@ -510,6 +524,7 @@ function stateMessage() {
     devices: devicesView(),
     layouts: config.layouts,
     schedules: config.schedules,
+    currentBuild: CURRENT_BUILD, // agent version the hub would push on "Update"
     instructorCodeRequired: false, // instructor sign-in is open; buildings use codes
   };
 }
@@ -749,6 +764,20 @@ function handleAgent(ws) {
       let fwd = 0;
       for (const dws of [...dashboards]) if (!dws.closed && dws.role === "admin") { dws.sendJSON(out); fwd++; }
       console.log(`[hub] exec_result from ${deviceId} -> forwarded to ${fwd} admin dashboard(s)`);
+    } else if (msg.type === "update_result") {
+      // outcome of a remote software update — relay to admin dashboards
+      const deviceId = wsDevice.get(ws);
+      const rec = deviceId && devices.get(deviceId);
+      const out = {
+        type: "update_result",
+        device_id: deviceId,
+        name: (rec && (config.deviceNames[deviceId] || rec.agentName || rec.hostname)) || deviceId,
+        ok: !!msg.ok,
+        wrote: Array.isArray(msg.wrote) ? msg.wrote : [],
+        error: String(msg.error || "").slice(0, 400),
+      };
+      for (const dws of [...dashboards]) if (!dws.closed && dws.role === "admin") dws.sendJSON(out);
+      console.log(`[hub] update_result from ${deviceId}: ${msg.ok ? "ok (" + (out.wrote.join(", ") || "-") + ")" : "FAILED: " + out.error}`);
     } else if (msg.type === "screenshot_frame") {
       // a live screen frame — relay only to the dashboard(s) currently viewing
       // this device's panel (on-demand; no broadcast, no storage).
@@ -855,6 +884,29 @@ function handleDashboard(ws) {
       }
       removeDeviceById(msg.deviceId);
       broadcastState();
+    } else if (msg.type === "updateAgent") {
+      // push the hub's current agent/watch source to laptop(s) and restart them
+      // on the new code (no per-laptop reinstall). Admin only; the dashboard never
+      // supplies the code — the hub is the source of truth for the latest version.
+      if (ws.role !== "admin") {
+        ws.sendJSON({ type: "error", detail: "admin required" });
+        return;
+      }
+      let agentSrc = "", watchSrc = "";
+      try {
+        agentSrc = fs.readFileSync(path.join(__dirname, "..", "agent", "agent.js"), "utf8");
+        watchSrc = fs.readFileSync(path.join(__dirname, "..", "agent", "watch.js"), "utf8");
+      } catch (e) {
+        ws.sendJSON({ type: "error", detail: "hub could not read agent source: " + e.message });
+        return;
+      }
+      const buildMatch = /const BUILD = "([^"]*)"/.exec(agentSrc);
+      const sent = sendCommand(msg.target || {}, "update_agent", {
+        files: { "agent.js": agentSrc, "id-tech-watch.js": watchSrc },
+        build: buildMatch ? buildMatch[1] : "",
+      });
+      ws.sendJSON({ type: "ack", action: "update_agent", sent });
+      console.log(`[hub] pushed agent update to ${sent} computer(s)`);
     }
   };
   ws.onclose = () => {
