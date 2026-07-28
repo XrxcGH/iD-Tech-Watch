@@ -49,7 +49,7 @@ const IS_MAC = process.platform === "darwin";
 
 // Build stamp — logged on startup so you can confirm which agent version a
 // laptop is actually running (see watch-client.log in the install folder).
-const BUILD = "2026-07-27 close_tab=Ctrl+W · name-display · remove-device";
+const BUILD = "2026-07-28 active-window · minimize-toggle · screen-view";
 
 const ENFORCE_INTERVAL_MS = 2000; // how often to sweep the blocklists
 const STATUS_INTERVAL_DEFAULT = 4; // seconds between status reports
@@ -78,6 +78,7 @@ let pauseChild = null; // full-screen "paused" overlay process
 let pauseActive = false; // true while paused (overlay reopens if student closes it)
 let pauseMessage = ""; // text shown on the pause overlay
 let pauseTimer = null; // auto-resume timer (timed/scheduled pauses)
+let screenshotChild = null; // persistent screen-capture helper (only while viewed)
 
 // Browser process names used by "close browsers" (to clear an already-open tab
 // that a hosts block can't retroactively close).
@@ -127,22 +128,35 @@ function run(cmd, args, timeoutMs = 6000) {
 async function inspect() {
   const processes = new Set();
   const windows = new Set();
+  let activeWindow = ""; // title of the current foreground window (for highlighting)
 
   if (IS_WIN) {
     // Only report apps that actually have a window on screen — the handful the
     // student is using, not the ~100 background/system processes. (Blocking still
-    // scans every process via killMatching, so it's unaffected.)
+    // scans every process via killMatching, so it's unaffected.) We also emit the
+    // FOREGROUND window's title (as an @ACTIVE@ line) so the instructor's window
+    // list can highlight what the student is actually looking at right now.
     const out = await run("powershell", [
       "-NoProfile",
       "-NonInteractive",
       "-Command",
-      'Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | ForEach-Object { $_.ProcessName + "`t" + $_.MainWindowTitle }',
+      "Add-Type -Namespace IDTa -Name W -MemberDefinition '" +
+        "[DllImport(\"user32.dll\")] public static extern System.IntPtr GetForegroundWindow();" +
+        "[DllImport(\"user32.dll\", CharSet=CharSet.Auto)] public static extern int GetWindowText(System.IntPtr h, System.Text.StringBuilder s, int n);" +
+        "'; " +
+        "$fg=[IDTa.W]::GetForegroundWindow(); $sb=New-Object System.Text.StringBuilder 512; [void][IDTa.W]::GetWindowText($fg,$sb,512); " +
+        "Write-Output ('@ACTIVE@`t' + $sb.ToString()); " +
+        'Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | ForEach-Object { $_.ProcessName + "`t" + $_.MainWindowTitle }',
     ]);
     for (const line of out.split(/\r?\n/)) {
       if (!line.trim()) continue;
       const tab = line.indexOf("\t");
       const name = (tab === -1 ? line : line.slice(0, tab)).trim();
       const title = (tab === -1 ? "" : line.slice(tab + 1)).trim();
+      if (name === "@ACTIVE@") {
+        if (title) activeWindow = title;
+        continue;
+      }
       if (name) processes.add(name);
       if (title) windows.add(title);
     }
@@ -167,6 +181,7 @@ async function inspect() {
   return {
     processes: [...processes].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())).slice(0, MAX_PROCESSES),
     windows: [...windows].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())),
+    activeWindow,
   };
 }
 
@@ -398,7 +413,7 @@ async function enforce() {
 
 // ------------------------------------------------------------------- status
 async function sendStatus(ws) {
-  const { processes, windows } = await inspect();
+  const { processes, windows, activeWindow } = await inspect();
   const blocked = [...activeAppBlocks()].map(([pattern, meta]) => ({
     pattern,
     expires_at: meta && meta.expiry ? meta.expiry / 1000 : 0,
@@ -407,7 +422,7 @@ async function sendStatus(ws) {
     domain,
     expires_at: exp ? exp / 1000 : 0,
   }));
-  ws.send(JSON.stringify({ type: "status", windows, processes, blocked, blockedSites, sitesAvailable }));
+  ws.send(JSON.stringify({ type: "status", windows, processes, activeWindow, blocked, blockedSites, sitesAvailable }));
 }
 
 // ------------------------------------------------------------------ commands
@@ -473,6 +488,10 @@ async function handleCommand(ws, msg) {
     sendKeys(p.keys != null ? p.keys : p.combo);
   } else if (action === "run_command") {
     runRemoteCommand(ws, p.command, p.request_id);
+  } else if (action === "start_screenshot") {
+    startScreenshot(ws);
+  } else if (action === "stop_screenshot") {
+    stopScreenshot();
   } else if (action === "stop_watch") {
     stopWatch();
   } else if (action === "pause") {
@@ -538,17 +557,15 @@ function closeCurrentTab() {
 // SendKeys('#m'): synthetic Win+M is UIPI-blocked from an elevated agent, but a
 // window message from high→medium integrity (the agent → explorer's tray) is
 // allowed, so this works elevated or not.
+// Show/hide the desktop — a REVERSIBLE toggle (Win+D). First press minimizes
+// every window; a second press restores them (Windows itself tracks the state,
+// so it stays in sync even if the student manually restored something). We
+// inject Win+D with keybd_event: it's a shell-level hotkey (not tied to which
+// window has focus) and works elevated. Replaces the old one-way tray MIN_ALL.
 function minimizeAll() {
   if (!IS_WIN) return;
-  const ps =
-    "Add-Type -Namespace IDTWin -Name Tray -MemberDefinition '" +
-    "[DllImport(\"user32.dll\", CharSet=CharSet.Auto)] public static extern System.IntPtr FindWindow(string c,string n);" +
-    "[DllImport(\"user32.dll\")] public static extern System.IntPtr SendMessage(System.IntPtr h,uint m,System.IntPtr w,System.IntPtr l);" +
-    "'; " +
-    "$t=[IDTWin.Tray]::FindWindow('Shell_TrayWnd',$null); if($t -ne [System.IntPtr]::Zero){ " +
-    "[void][IDTWin.Tray]::SendMessage($t,0x111,[System.IntPtr]419,[System.IntPtr]::Zero) }";
-  execFile("powershell", ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps], { windowsHide: true }, () => {});
-  log("minimized all windows (shell MIN_ALL)");
+  pressVks([0x5b, 0x44]); // Win (LWIN) + D  → toggle show-desktop
+  log("toggle desktop (Win+D)");
 }
 
 // ------------------------------------------------------ generic keystroke sender
@@ -644,6 +661,74 @@ function runRemoteCommand(ws, cmdline, requestId) {
   });
 }
 
+// ------------------------------------------------------ on-demand screen view
+// A LIVE, LOW-RES screen thumbnail — captured ONLY while an instructor has this
+// computer's control panel open (the hub starts it on open, stops it on close),
+// so there is no continuous/background screen recording. A single persistent
+// PowerShell loop grabs the primary screen ~1x/sec, scales it down, JPEG-encodes
+// it, and prints one base64 frame per line; we forward each frame to the hub,
+// which relays it to the viewing dashboard. Set IDT_ALLOW_SCREENSHOT=0 to disable.
+function screenshotLoopScript() {
+  return (
+    "Add-Type -AssemblyName System.Drawing,System.Windows.Forms; " +
+    "$tw=640; " + // scaled width (~360-480p); a tiny thumbnail, light on bandwidth
+    "$enc=[System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }; " +
+    "$ep=New-Object System.Drawing.Imaging.EncoderParameters 1; " +
+    "$ep.Param[0]=New-Object System.Drawing.Imaging.EncoderParameter ([System.Drawing.Imaging.Encoder]::Quality,[long]42); " +
+    "while($true){ try { " +
+    "$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; " +
+    "$bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; " +
+    "$g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size); $g.Dispose(); " +
+    "$th=[int]($tw*$b.Height/$b.Width); " +
+    "$sm=New-Object System.Drawing.Bitmap $tw,$th; " +
+    "$g2=[System.Drawing.Graphics]::FromImage($sm); $g2.InterpolationMode='HighQualityBicubic'; $g2.DrawImage($bmp,0,0,$tw,$th); $g2.Dispose(); $bmp.Dispose(); " +
+    "$ms=New-Object System.IO.MemoryStream; $sm.Save($ms,$enc,$ep); $sm.Dispose(); " +
+    "Write-Output ('@FRAME@'+[Convert]::ToBase64String($ms.ToArray())); $ms.Dispose(); " +
+    "} catch {} Start-Sleep -Milliseconds 1000 }"
+  );
+}
+function startScreenshot(ws) {
+  if (!IS_WIN) return;
+  if (process.env.IDT_ALLOW_SCREENSHOT === "0") {
+    log("screenshot requested but disabled (IDT_ALLOW_SCREENSHOT=0).");
+    return;
+  }
+  if (screenshotChild) return; // already streaming
+  log("screen view started (an instructor opened this computer's panel).");
+  screenshotChild = spawn(
+    "powershell",
+    ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", screenshotLoopScript()],
+    { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }
+  );
+  let buf = "";
+  screenshotChild.stdout.on("data", (chunk) => {
+    buf += chunk.toString("latin1"); // base64 is ASCII; latin1 avoids UTF surprises
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).replace(/\r$/, "");
+      buf = buf.slice(nl + 1);
+      if (line.startsWith("@FRAME@")) {
+        try {
+          ws.send(JSON.stringify({ type: "screenshot_frame", data: line.slice(7) }));
+        } catch (_) {}
+      }
+    }
+    if (buf.length > 1e6) buf = ""; // safety: never let the buffer grow unbounded
+  });
+  screenshotChild.on("exit", () => {
+    screenshotChild = null;
+  });
+}
+function stopScreenshot() {
+  if (screenshotChild) {
+    try {
+      screenshotChild.kill();
+    } catch (_) {}
+    screenshotChild = null;
+    log("screen view stopped.");
+  }
+}
+
 // -------------------------------------------------------------- pause / resume
 // A full-screen, always-on-top overlay so students stop and look up. It stays
 // until the instructor resumes, and REOPENS if the student closes it. It is not
@@ -732,6 +817,9 @@ function killHelpers() {
   } catch (_) {}
   try {
     if (pauseChild) pauseChild.kill();
+  } catch (_) {}
+  try {
+    if (screenshotChild) screenshotChild.kill();
   } catch (_) {}
 }
 function cleanupAndExit(code) {

@@ -742,6 +742,18 @@ select:focus {
 .list .row:last-child {
   border-bottom: none;
 }
+/* the window the student is actually looking at right now */
+.list .row.active-win {
+  background: var(--id-green-soft);
+  color: var(--brand-ink);
+  font-weight: 700;
+  border-left: 3px solid var(--id-green);
+  padding-left: 6px;
+}
+.list .row.active-win::before {
+  content: "▸ ";
+  color: var(--id-green);
+}
 .row.muted {
   color: var(--muted);
 }
@@ -1116,6 +1128,72 @@ details.apps .procs {
 }
 .sheet .list.windows {
   max-height: 30vh;
+}
+
+/* on-demand live screen thumbnail inside the device panel */
+.live-view {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #000;
+  min-height: 90px;
+}
+.live-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 40vh;
+  object-fit: contain;
+}
+.live-view:not(.streaming) .live-img {
+  min-height: 120px;
+}
+.live-view:not(.streaming)::after {
+  content: "Connecting to screen…";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #cfcfcf;
+  font-size: 13px;
+}
+.live-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+.live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ff4d4d;
+  animation: livePulse 1.4s ease-in-out infinite;
+}
+@keyframes livePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.live-hint {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 4px 8px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.6));
+  color: #e6e6e6;
+  font-size: 11px;
 }
 
 /* seating lock toggle + custom-duration row */

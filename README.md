@@ -25,8 +25,13 @@ For **camp-managed laptops** in a **supervised, in-person classroom** with minor
 - **Transparent, not covert.** The agent runs visibly, prints what it's doing,
   and shows a "monitoring is active" notice. Tell students (and parents, per iD
   Tech policy) that class laptops are monitored.
-- **Minimal data.** It reports *window titles and app names* only — no
-  keystrokes, passwords, webcams, or continuous screenshots.
+- **Minimal data.** Continuously it reports only *window titles and app names* —
+  no keystrokes, passwords, webcams, or background screen recording. A **live
+  screen thumbnail** can be viewed **on demand**: it is captured only while an
+  instructor has that one computer's control panel open, at ~1 fps and low
+  resolution, and it stops the moment the panel closes (nothing is stored). Tell
+  students their screen may be viewed while class laptops are monitored; set
+  `IDT_ALLOW_SCREENSHOT=0` on the agent to turn the feature off entirely.
 - Do not deploy on personal/BYO devices or outside a supervised class.
 
 ---
@@ -294,25 +299,34 @@ hub, and pass `--token <same value>` to each agent.
 ## Message protocol (WebSocket JSON)
 
 **Agent → Hub:** `register` (device_id, hostname, **name** (student/display name),
-os, location, building, klass?, token) · `status` (windows, processes, blocked,
-blockedSites, sitesAvailable) · `exec_result` (result of a `run_command`, relayed
-to admin dashboards). The `device_id` is a stable machine id (derived from
-hostname+MAC, or an explicit `--device`); `name` is the editable display name and
-seeds the dashboard's per-device name (a dashboard rename overrides it).
+os, location, building, klass?, token) · `status` (windows, **activeWindow** (the
+foreground window's title, highlighted in the instructor's list), processes,
+blocked, blockedSites, sitesAvailable) · `exec_result` (result of a `run_command`,
+relayed to admin dashboards) · `screenshot_frame` (a base64 JPEG live-screen frame,
+relayed only to the dashboard viewing that computer). The `device_id` is a stable
+machine id (derived from hostname+MAC, or an explicit `--device`); `name` is the
+editable display name and seeds the dashboard's per-device name (a dashboard rename
+overrides it).
 
 **Hub → Agent:** `command` with `action` ∈ `kill_process | block_app | unblock_app |
 block_site | unblock_site | unblock_all | close_browsers | close_tab | minimize_all |
-send_keys | run_command | stop_watch | pause | resume | message | list_now`. `block_app` accepts
-`pattern` or `patterns[]` plus an optional `exclude[]` (substrings to spare — e.g.
-block `roblox` while sparing `studio`); `block_site` accepts `domain` or `domains[]`;
-both accept `duration_sec` (omit/0 = until lifted). `pause` accepts `text` and an
-optional `duration_sec` (auto-resume — the agent lifts on its own and the hub also
-sends a resume). `message` accepts `hold_sec` (OK is hidden/locked this long) and
-`auto_close_sec` (self-dismiss). `close_tab` closes the active browser **tab**
-(Ctrl+W via `keybd_event` on the focused window); `minimize_all` shows the desktop
-(shell MIN_ALL window message). Both work when the agent runs elevated — Windows
-UIPI only blocks low→high input, so a High-integrity agent may inject into the
-normal (Medium) browser, and a hidden helper never steals the browser's focus.
+send_keys | run_command | stop_watch | start_screenshot | stop_screenshot | pause |
+resume | message | list_now`. `block_app` accepts `pattern` or `patterns[]` plus an
+optional `exclude[]` (substrings to spare — e.g. block `roblox` while sparing
+`studio`); `block_site` accepts `domain` or `domains[]`; both accept `duration_sec`
+(omit/0 = until lifted). `pause` accepts `text` and an optional `duration_sec`
+(auto-resume — the agent lifts on its own and the hub also sends a resume).
+`message` accepts `hold_sec` (OK is hidden/locked this long) and `auto_close_sec`
+(self-dismiss). `close_tab` closes the active browser **tab** (Ctrl+W via
+`keybd_event` on the focused window); `minimize_all` toggles show-desktop (Win+D) so
+it minimizes every window and **restores** them on a second press. Both work when
+the agent runs elevated — Windows UIPI only blocks low→high input, so a
+High-integrity agent may inject into the normal (Medium) browser, and a hidden
+helper never steals the browser's focus. `start_screenshot`/`stop_screenshot` begin
+and end an **on-demand** ~1 fps low-res (≈640px) JPEG screen stream — the hub starts
+it only while an instructor has that one computer's panel open and stops it (last
+viewer leaves) so nothing is captured in the background; set `IDT_ALLOW_SCREENSHOT=0`
+on the agent to disable it entirely.
 `send_keys` presses a `keys` combo (`"win+d"`, `"ctrl+w"`, `"alt+F4"`, …) on the
 front window via `keybd_event`. `run_command` runs a shell `command` — it is
 **admin-only** (hub-enforced) and each agent ignores it unless started with
