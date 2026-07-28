@@ -41,10 +41,134 @@
     }, 2600);
   }
 
+  // ------------------------------------------------------------- modal dialogs
+  // Real in-app dialogs replace the browser's prompt()/confirm() (which look
+  // out of place, can't be styled/themed, and block the page). Lives in its own
+  // #modal layer so it never collides with the seat control sheet (#overlay).
+  function ensureModalLayer() {
+    let m = document.getElementById("modal");
+    if (!m) {
+      m = el("div", { id: "modal" });
+      document.body.append(m);
+    }
+    return m;
+  }
+  function openModal({ title, body, actions, onClose, width }) {
+    const layer = ensureModalLayer();
+    layer.innerHTML = "";
+    const card = el("div", { class: "modal-card" });
+    if (width) card.style.maxWidth = width;
+    card.addEventListener("click", (e) => e.stopPropagation());
+    let closed = false;
+    function close() {
+      if (closed) return;
+      closed = true;
+      layer.classList.remove("open");
+      layer.innerHTML = "";
+      document.removeEventListener("keydown", onKey);
+      if (onClose) onClose();
+    }
+    function onKey(e) {
+      if (e.key === "Escape") close();
+    }
+    card.append(
+      el(
+        "div",
+        { class: "modal-head" },
+        el("h3", {}, title || ""),
+        el("button", { class: "modal-x", title: "Close", onclick: close }, "✕")
+      ),
+      el("div", { class: "modal-body" }, body),
+      actions && actions.length ? el("div", { class: "modal-foot" }, ...actions) : null
+    );
+    document.addEventListener("keydown", onKey);
+    layer.append(el("div", { class: "modal-backdrop", onclick: close }), card);
+    layer.classList.add("open");
+    return { close, card };
+  }
+
+  // Promise-based confirm dialog. Resolves true/false.
+  function modalConfirm(message, opts) {
+    opts = opts || {};
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (v) => {
+        if (done) return;
+        done = true;
+        m.close();
+        resolve(v);
+      };
+      const ok = el("button", { class: "btn " + (opts.danger ? "danger" : "primary"), onclick: () => finish(true) }, opts.okText || "OK");
+      const cancel = el("button", { class: "btn ghost", onclick: () => finish(false) }, opts.cancelText || "Cancel");
+      const m = openModal({
+        title: opts.title || "Please confirm",
+        body: el("p", { class: "modal-msg" }, message),
+        actions: [cancel, ok],
+        onClose: () => finish(false),
+        width: "440px",
+      });
+      setTimeout(() => ok.focus(), 30);
+    });
+  }
+
+  // Promise-based single-field prompt. Resolves the string, or null if cancelled.
+  function modalPrompt(opts) {
+    opts = opts || {};
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (v) => {
+        if (done) return;
+        done = true;
+        m.close();
+        resolve(v);
+      };
+      const input = opts.multiline
+        ? el("textarea", { class: "modal-input", rows: String(opts.rows || 3), placeholder: opts.placeholder || "" })
+        : el("input", { class: "modal-input", type: opts.inputType || "text", placeholder: opts.placeholder || "" });
+      input.value = opts.value || "";
+      const ok = el("button", { class: "btn " + (opts.danger ? "danger" : "primary"), onclick: () => finish(input.value) }, opts.okText || "Save");
+      const cancel = el("button", { class: "btn ghost", onclick: () => finish(null) }, "Cancel");
+      const m = openModal({
+        title: opts.title || "",
+        body: el(
+          "div",
+          {},
+          opts.label ? el("label", { class: "modal-label" }, opts.label) : null,
+          input,
+          opts.hint ? el("div", { class: "modal-hint" }, opts.hint) : null
+        ),
+        actions: [cancel, ok],
+        onClose: () => finish(null),
+        width: opts.width || "460px",
+      });
+      if (!opts.multiline)
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            finish(input.value);
+          }
+        });
+      setTimeout(() => {
+        input.focus();
+        if (input.select) input.select();
+      }, 30);
+    });
+  }
+
+  // Show the output returned by a run_command, in a monospace modal.
+  function showExecResult(msg) {
+    const body = el("div", { class: "exec-result" });
+    body.append(el("div", { class: "modal-hint" }, `${msg.name || msg.device_id} · exit ${msg.code}${msg.ok ? "" : " (error)"}`));
+    if (msg.stdout && msg.stdout.trim()) body.append(el("div", { class: "modal-label" }, "Output"), el("pre", { class: "exec-out" }, msg.stdout));
+    if (msg.stderr && msg.stderr.trim()) body.append(el("div", { class: "modal-label" }, "Errors"), el("pre", { class: "exec-out err" }, msg.stderr));
+    if ((!msg.stdout || !msg.stdout.trim()) && (!msg.stderr || !msg.stderr.trim())) body.append(el("p", { class: "modal-msg" }, "(no output)"));
+    const m = openModal({ title: "Command result", body, actions: [el("button", { class: "btn primary", onclick: () => m.close() }, "Close")], width: "640px" });
+  }
+
   // ------------------------------------------------------------------ state
   const D = { org: [], devices: {}, layouts: {}, schedules: [], instructorCodeRequired: false };
   const nav = { view: "login", locationId: null, buildingId: null, classId: null };
-  const ui = { blockDurationSec: 60, loginRole: "instructor", connected: false, monitorMode: "grid", dragging: null, unlocked: {}, expandedProcs: new Set(), classSort: "room", scroll: {}, lastScrollAt: 0, theme: localStorage.getItem("idt_theme") || "light" };
+  const ui = { blockDurationSec: 60, loginRole: "instructor", connected: false, monitorMode: "grid", dragging: null, unlocked: {}, expandedProcs: new Set(), classSort: "room", scroll: {}, lastScrollAt: 0, theme: localStorage.getItem("idt_theme") || "dark" };
 
   function applyTheme() {
     document.documentElement.dataset.theme = ui.theme;
@@ -70,6 +194,7 @@
   let auth = JSON.parse(localStorage.getItem("idt_auth") || "null"); // {token, role}
   let ws = null;
   let lastAdminSig = "";
+  let lastMonitorSig = ""; // gates monitor re-renders to real content changes
   let lastPaintSig = "";
   let paintAnimate = false; // only animate on a real navigation, not live re-renders
 
@@ -80,7 +205,10 @@
   // substrings. "minecraft" catches the launcher + Bedrock; Java edition runs as
   // javaw.exe (block "javaw" manually only if your camp doesn't use Java).
   const BLOCK_PRESETS = [
-    { id: "roblox", label: "Roblox", apps: ["roblox"], sites: ["roblox.com"] },
+    // Block the Roblox *player* but never Roblox *Studio* — Studio is the coding
+    // tool used in class. The agent matches "roblox" and excludes "studio", so
+    // RobloxPlayerBeta dies while RobloxStudioBeta keeps running.
+    { id: "roblox", label: "Roblox (Player)", apps: ["roblox"], exclude: ["studio"], sites: ["roblox.com"] },
     { id: "minecraft", label: "Minecraft", apps: ["minecraft"], sites: ["minecraft.net", "classic.minecraft.net"] },
     { id: "fortnite", label: "Fortnite", apps: ["fortnite"], sites: [] },
     { id: "steam", label: "Steam", apps: ["steam"], sites: ["steampowered.com", "steamcommunity.com"] },
@@ -181,6 +309,8 @@
         onState();
       } else if (msg.type === "ack") {
         toast(`Command sent to ${msg.sent} computer(s).`);
+      } else if (msg.type === "exec_result") {
+        showExecResult(msg);
       } else if (msg.type === "error") {
         toast(msg.detail || "Error");
       }
@@ -206,10 +336,26 @@
   const org = (op) => send(Object.assign({ type: "org" }, op));
   const classrule = (op) => send(Object.assign({ type: "classrule" }, op));
   const rename = (deviceId, name) => send({ type: "rename", deviceId, name });
-  // display name = the student's name if set, otherwise the machine hostname
-  const nameOf = (d) => (d.customName && d.customName.trim() ? d.customName : d.hostname);
-  function promptRename(d) {
-    const n = prompt(`Rename this computer to the student's name (blank resets to "${d.hostname}"):`, d.customName || "");
+  const removeDevice = (deviceId) => send({ type: "removeDevice", deviceId });
+  // display name priority: dashboard rename (customName) → the name entered at
+  // setup (agentName) → the machine hostname.
+  const nameOf = (d) =>
+    d.customName && d.customName.trim()
+      ? d.customName
+      : d.agentName && d.agentName.trim()
+        ? d.agentName
+        : d.hostname;
+  // what a blank rename falls back to (shown as the rename field's placeholder)
+  const defaultNameOf = (d) => (d.agentName && d.agentName.trim() ? d.agentName : d.hostname);
+  async function promptRename(d) {
+    const n = await modalPrompt({
+      title: "Rename computer",
+      label: "Show this computer as…",
+      value: d.customName || "",
+      placeholder: d.hostname,
+      hint: `The student's name. Leave blank to reset to “${d.hostname}”.`,
+      okText: "Rename",
+    });
     if (n !== null) rename(d.device_id, n.trim());
   }
 
@@ -272,14 +418,16 @@
           class: "dur-select",
           onchange: (e) => {
             if (e.target.value === "custom") {
-              const m = prompt("Block for how many minutes? (0 = until I lift it)", "5");
-              if (m !== null) {
-                const mins = parseInt(m, 10);
-                if (!Number.isNaN(mins) && mins >= 0) ui.blockDurationSec = mins * 60;
-              }
-            } else {
-              ui.blockDurationSec = parseInt(e.target.value, 10);
+              modalPrompt({ title: "Custom block duration", label: "Block for how many minutes?", value: "5", hint: "0 = until I lift it", okText: "Set" }).then((m) => {
+                if (m !== null) {
+                  const mins = parseInt(m, 10);
+                  if (!Number.isNaN(mins) && mins >= 0) ui.blockDurationSec = mins * 60;
+                }
+                render();
+              });
+              return;
             }
+            ui.blockDurationSec = parseInt(e.target.value, 10);
             render();
           },
         },
@@ -293,7 +441,7 @@
   const robloxPreset = () => BLOCK_PRESETS.find((p) => p.id === "roblox");
   function blockPreset(dispatch, preset) {
     const dur = ui.blockDurationSec;
-    if (preset.apps && preset.apps.length) dispatch("block_app", { patterns: preset.apps, duration_sec: dur });
+    if (preset.apps && preset.apps.length) dispatch("block_app", { patterns: preset.apps, exclude: preset.exclude || [], duration_sec: dur });
     if (preset.sites && preset.sites.length) dispatch("block_site", { domains: preset.sites, duration_sec: dur });
     if (preset.closeTabs) dispatch("close_tab", {}); // close the open tab so the block bites now
     toast(`Blocking ${preset.label}${preset.closeTabs ? " (+ closing the open tab)" : ""}.`);
@@ -301,65 +449,121 @@
   function blockAllGames(dispatch) {
     const apps = [...new Set(BLOCK_PRESETS.flatMap((p) => p.apps))];
     const sites = [...new Set(BLOCK_PRESETS.flatMap((p) => p.sites))];
-    dispatch("block_app", { patterns: apps, duration_sec: ui.blockDurationSec });
+    const exclude = [...new Set(BLOCK_PRESETS.flatMap((p) => p.exclude || []))];
+    dispatch("block_app", { patterns: apps, exclude, duration_sec: ui.blockDurationSec });
     dispatch("block_site", { domains: sites, duration_sec: ui.blockDurationSec });
     dispatch("close_tab", {});
     toast("Blocking all games + gaming sites.");
   }
-  // A compact "Block…" dropdown usable at class or device scope.
+  // A compact custom "Block…" dropdown (usable at class or device scope). Built
+  // by hand rather than a native <select> so it matches the app's theme and can
+  // show section headers, icons, and a danger accent — none of which a native
+  // <option> list can style consistently.
   function blockSelect(dispatch) {
-    const sel = el("select", {
-      class: "block-select",
-      onchange: (e) => {
-        const v = e.target.value;
-        e.target.value = "";
-        if (!v) return;
-        if (v === "__all__") return blockAllGames(dispatch);
-        if (v === "__app__") {
-          const n = prompt("Block which app? (name or part of it, e.g. steam)");
-          if (n && n.trim()) dispatch("block_app", { pattern: n.trim(), duration_sec: ui.blockDurationSec });
-          return;
-        }
-        if (v === "__site__") {
-          const n = prompt("Block which website? (e.g. poki.com)");
-          if (n && n.trim()) {
-            dispatch("block_site", { domain: n.trim(), duration_sec: ui.blockDurationSec });
-            dispatch("close_tab", {}); // close the open tab so it takes effect immediately
-            toast(`Blocking ${n.trim()} (+ closing the open tab).`);
-          }
-          return;
-        }
-        if (v === "__closetab__") {
-          dispatch("close_tab", {});
-          return;
-        }
-        if (v === "__minimize__") {
-          dispatch("minimize_all", {});
-          return;
-        }
-        if (v === "__closebrowsers__") {
-          if (confirm("Close ALL browser windows now? This closes every open tab on the target computer(s)."))
-            dispatch("close_browsers", {});
-          return;
-        }
-        const preset = BLOCK_PRESETS.find((p) => p.id === v);
-        if (preset) blockPreset(dispatch, preset);
-      },
-    });
-    sel.append(el("option", { value: "" }, "🚫 Block…"));
-    const games = el("optgroup", { label: "Games & sites" });
-    BLOCK_PRESETS.forEach((p) => games.append(el("option", { value: p.id }, p.label)));
-    games.append(el("option", { value: "__all__" }, "— All games + sites —"));
-    const custom = el("optgroup", { label: "Custom" });
-    custom.append(el("option", { value: "__app__" }, "Custom app…"), el("option", { value: "__site__" }, "Custom website…"));
-    const now = el("optgroup", { label: "Do now" });
-    now.append(
-      el("option", { value: "__closetab__" }, "Close current tab"),
-      el("option", { value: "__minimize__" }, "Minimize all windows"),
-      el("option", { value: "__closebrowsers__" }, "Close ALL browsers")
+    const wrap = el("div", { class: "blockmenu" });
+    const pop = el("div", { class: "blockmenu-pop" });
+    const trigger = el(
+      "button",
+      { class: "block-select", type: "button", "aria-haspopup": "true" },
+      el("span", {}, "🚫 Block…"),
+      el("span", { class: "caret" }, "▾")
     );
-    sel.append(games, custom, now);
-    return sel;
+
+    function close() {
+      pop.classList.remove("open", "up");
+      wrap.classList.remove("open");
+      document.removeEventListener("mousedown", onDoc, true);
+      document.removeEventListener("keydown", onKey, true);
+    }
+    function open() {
+      // close any other open block menu first
+      document.querySelectorAll(".blockmenu.open .blockmenu-pop").forEach((p) => p.classList.remove("open", "up"));
+      document.querySelectorAll(".blockmenu.open").forEach((w) => w.classList.remove("open"));
+      pop.classList.add("open");
+      wrap.classList.add("open");
+      // fit within the viewport: flip above the trigger when there's more room
+      // there, and cap the height so the menu scrolls instead of running off-screen.
+      const r = trigger.getBoundingClientRect();
+      const below = window.innerHeight - r.bottom - 12;
+      const above = r.top - 12;
+      if (below < 280 && above > below) {
+        pop.classList.add("up");
+        pop.style.maxHeight = above + "px";
+      } else {
+        pop.classList.remove("up");
+        pop.style.maxHeight = Math.max(160, below) + "px";
+      }
+      document.addEventListener("mousedown", onDoc, true);
+      document.addEventListener("keydown", onKey, true);
+    }
+    function onDoc(e) {
+      if (!wrap.contains(e.target)) close();
+    }
+    function onKey(e) {
+      if (e.key === "Escape") close();
+    }
+    trigger.addEventListener("click", (e) => {
+      e.stopPropagation();
+      pop.classList.contains("open") ? close() : open();
+    });
+
+    const runItem = (fn) => {
+      close();
+      fn();
+    };
+    const item = (label, fn, opts) =>
+      el("button", { class: "blockmenu-item" + (opts && opts.danger ? " danger" : ""), type: "button", onclick: () => runItem(fn) }, label);
+    const groupEl = (label, items) => el("div", { class: "blockmenu-group" }, el("div", { class: "blockmenu-label" }, label), ...items);
+
+    const customApp = () =>
+      modalPrompt({ title: "Block an app", label: "Block which app?", placeholder: "name or part of it, e.g. steam", okText: "Block" }).then((n) => {
+        if (n && n.trim()) dispatch("block_app", { pattern: n.trim(), duration_sec: ui.blockDurationSec });
+      });
+    const customSite = () =>
+      modalPrompt({ title: "Block a website", label: "Block which website?", placeholder: "e.g. poki.com", okText: "Block" }).then((n) => {
+        if (n && n.trim()) {
+          dispatch("block_site", { domain: n.trim(), duration_sec: ui.blockDurationSec });
+          dispatch("close_tab", {});
+          toast(`Blocking ${n.trim()} (+ closing the open tab).`);
+        }
+      });
+    const closeBrowsers = () =>
+      modalConfirm("Close ALL browser windows now? This closes every open tab on the target computer(s).", { title: "Close all browsers", danger: true, okText: "Close browsers" }).then((ok) => {
+        if (ok) dispatch("close_browsers", {});
+      });
+    const sendKeysItem = () =>
+      modalPrompt({ title: "Send a keyboard shortcut", label: "Keys to press on the front window", value: "ctrl+w", placeholder: "e.g. win+d, alt+F4, ctrl+shift+t", hint: "Combine with +. Modifiers: ctrl, alt, shift, win.", okText: "Press" }).then((keys) => {
+        if (keys && keys.trim()) {
+          dispatch("send_keys", { keys: keys.trim() });
+          toast(`Pressing ${keys.trim()}.`);
+        }
+      });
+    const runCmdItem = () =>
+      modalPrompt({ title: "Run a command", label: "Command to run (cmd.exe) on the target computer(s)", placeholder: "e.g. ipconfig /all", hint: "Admin only. The client must be started with IDT_ALLOW_EXEC=1. Output is returned to you.", okText: "Run", danger: true }).then((cmd) => {
+        if (cmd && cmd.trim()) {
+          dispatch("run_command", { command: cmd.trim() });
+          toast("Command sent — waiting for output…");
+        }
+      });
+
+    const gameItems = BLOCK_PRESETS.map((p) => item(p.label, () => blockPreset(dispatch, p)));
+    gameItems.push(item("All games + sites", () => blockAllGames(dispatch), { danger: true }));
+
+    const doNow = [
+      item("Close current tab", () => dispatch("close_tab", {})),
+      item("Minimize all windows", () => dispatch("minimize_all", {})),
+      item("Close ALL browsers", closeBrowsers, { danger: true }),
+      item("Send keyboard shortcut…", sendKeysItem),
+    ];
+    if (auth && auth.role === "admin" && !DEMO) doNow.push(item("Run command… (admin)", runCmdItem, { danger: true }));
+
+    pop.append(
+      groupEl("Games & sites", gameItems),
+      groupEl("Custom", [item("Custom app…", customApp), item("Custom website…", customSite)]),
+      groupEl("Do now", doNow)
+    );
+    wrap.append(trigger, pop);
+    return wrap;
   }
 
   function logout() {
@@ -395,7 +599,11 @@
   // them (this was closing the Block menus during the beta).
   function busyEditing() {
     const a = document.activeElement;
-    return !!(a && ["INPUT", "SELECT", "TEXTAREA", "OPTION"].includes(a.tagName));
+    if (a && ["INPUT", "SELECT", "TEXTAREA", "OPTION"].includes(a.tagName)) return true;
+    // an open custom Block menu or a modal shouldn't be torn down by a live re-render
+    if (document.querySelector(".blockmenu-pop.open")) return true;
+    if (document.getElementById("modal") && document.getElementById("modal").classList.contains("open")) return true;
+    return false;
   }
   // true briefly after any scroll, so live re-renders don't fight the user
   function scrolling() {
@@ -417,11 +625,46 @@
     });
   }
 
+  // Signature of everything the monitor actually DRAWS — deliberately excluding
+  // the two things that change every second (block countdown expiry + a device's
+  // last_seen). Those are refreshed in place by refreshLiveLabels() instead of a
+  // full rebuild. This is the fix for "the UI flashes with blocks": a status
+  // heartbeat or a ticking countdown no longer tears down and rebuilds the grid.
+  function monitorSig() {
+    return JSON.stringify({
+      view: [nav.view, nav.locationId, nav.buildingId, nav.classId, ui.monitorMode],
+      org: D.org.map((l) => [l.id, l.name, l.buildings.map((b) => [b.id, b.name, b.code ? 1 : 0, b.classes.map((c) => [c.id, c.name, c.instructor, c.room, (c.blockApps || []).join(",")])])]),
+      devs: deviceList().map((d) => [
+        d.device_id, d.online ? 1 : 0, nameOf(d), d.os, d.locationId, d.buildingId, d.classId,
+        (d.windows || []).join("|"),
+        (d.processes || []).length,
+        (d.blocked || []).map((b) => b.pattern).sort().join(","),
+        (d.blockedSites || []).map((b) => b.domain).sort().join(","),
+        d.sitesAvailable === false ? 0 : 1,
+      ]),
+      layouts: D.layouts,
+    });
+  }
+
+  // Update just the live text (block countdowns + "x ago") without rebuilding.
+  function refreshLiveLabels() {
+    const now = Date.now() / 1000;
+    document.querySelectorAll(".cd[data-exp]").forEach((n) => {
+      n.textContent = ` (${Math.max(0, Math.round(Number(n.dataset.exp) - now))}s)`;
+    });
+    document.querySelectorAll("[data-ago]").forEach((n) => {
+      n.textContent = agoLabel(Number(n.dataset.ago));
+    });
+  }
+
   function onState() {
     updateConn();
     // don't yank the DOM out from under a seat drag, an open dropdown, or a scroll
     if (nav.view === "monitor") {
-      if (!ui.dragging && !busyEditing() && !scrolling()) render();
+      if (ui.dragging || busyEditing() || scrolling()) return;
+      const sig = monitorSig();
+      if (sig !== lastMonitorSig) render(); // real change → rebuild (sig set in render)
+      else refreshLiveLabels(); // nothing structural changed → just tick the labels
     } else if (nav.view === "admin") {
       if (!busyEditing() && !scrolling() && adminSig() !== lastAdminSig) render();
     }
@@ -444,6 +687,7 @@
     }
     app.append(renderShell(nav.view === "admin" ? renderAdmin() : renderMonitor()));
     if (nav.view === "admin") lastAdminSig = adminSig();
+    if (nav.view === "monitor") lastMonitorSig = monitorSig();
     restoreScroll(); // keep scrollable lists where the user left them
   }
 
@@ -825,10 +1069,9 @@
       el("button", { class: "btn", onclick: () => runAll("unblock_all", {}) }, "Unblock all"),
       el("button", { class: "btn", onclick: () => runAll("pause", { text: "Paused by your instructor — eyes up front." }) }, "⏸ Pause"),
       el("button", { class: "btn", onclick: () => runAll("resume", {}) }, "▶ Resume"),
-      el("button", { class: "btn danger", onclick: () => promptWarn(runAll, "every screen in this class") }, "⚠ Full-screen…"),
       el("button", { class: "btn", onclick: () => runAll("close_tab", {}) }, "Close tab"),
       el("button", { class: "btn", onclick: () => runAll("minimize_all", {}) }, "Minimize"),
-      el("button", { class: "btn", onclick: () => promptMessageTimed(runAll, "every screen in this class") }, "Message class")
+      el("button", { class: "btn", onclick: () => openMessageComposer(runAll, "every screen in this class") }, "✉ Message / Lock…")
     );
 
     const sorted = devs.slice().sort((a, b) => nameOf(a).toLowerCase().localeCompare(nameOf(b).toLowerCase()));
@@ -1021,11 +1264,10 @@
       el("div", { class: "sheet-sub" }, `${nameOf(d) !== d.hostname ? d.hostname + " · " : ""}${(d.windows || []).length} open window(s) · ${(d.processes || []).length} apps · ${d.online ? "online" : "offline"}`)
     );
 
-    const left = (exp) => (exp > 0 ? ` (${Math.max(0, Math.round(exp - Date.now() / 1000))}s)` : "");
     if ((d.blocked || []).length || (d.blockedSites || []).length) {
       const chips = el("div", { class: "chips" });
-      (d.blocked || []).forEach((b) => chips.append(el("span", { class: "chip" }, `⛔ ${b.pattern}${left(b.expires_at)}`)));
-      (d.blockedSites || []).forEach((b) => chips.append(el("span", { class: "chip site" }, `🌐 ${b.domain}${left(b.expires_at)}`)));
+      (d.blocked || []).forEach((b) => chips.append(blockChip("⛔", b.pattern, b.expires_at)));
+      (d.blockedSites || []).forEach((b) => chips.append(blockChip("🌐", b.domain, b.expires_at, "site")));
       sheet.append(chips);
     }
 
@@ -1045,10 +1287,9 @@
         el("button", { class: "btn sm", onclick: () => command(t, "unblock_all", {}) }, "Unblock all"),
         el("button", { class: "btn sm", onclick: () => command(t, "pause", { text: "Paused by your instructor — eyes up front." }) }, "⏸ Pause"),
         el("button", { class: "btn sm", onclick: () => command(t, "resume", {}) }, "▶ Resume"),
-        el("button", { class: "btn sm danger", onclick: () => promptWarn(dispatch, "this student") }, "⚠ Full-screen…"),
         el("button", { class: "btn sm", onclick: () => command(t, "close_tab", {}) }, "Close tab"),
         el("button", { class: "btn sm", onclick: () => command(t, "minimize_all", {}) }, "Minimize"),
-        el("button", { class: "btn sm", onclick: () => promptMessage(t) }, "Message…"),
+        el("button", { class: "btn sm", onclick: () => promptMessage(t) }, "✉ Message / Lock…"),
         el("button", { class: "btn sm ghost", onclick: () => command(t, "list_now", {}) }, "Refresh")
       )
     );
@@ -1065,6 +1306,15 @@
     return `${Math.floor(s / 3600)}h ago`;
   }
 
+  // A block chip whose countdown lives in its own .cd[data-exp] span, so
+  // refreshLiveLabels() can tick it in place without rebuilding the card.
+  function blockChip(icon, label, expiresAt, extraClass) {
+    const chip = el("span", { class: "chip" + (extraClass ? " " + extraClass : "") }, `${icon} ${label}`);
+    if (expiresAt > 0)
+      chip.append(el("span", { class: "cd", "data-exp": String(expiresAt) }, ` (${Math.max(0, Math.round(expiresAt - Date.now() / 1000))}s)`));
+    return chip;
+  }
+
   function deviceCard(d) {
     const card = el("div", { class: "card" + (d.online ? "" : " offline") });
     card.append(
@@ -1074,15 +1324,14 @@
         el("span", { class: "dot " + (d.online ? "on" : "off") }),
         el("span", { class: "hostname", title: nameOf(d) !== d.hostname ? d.hostname : "", ondblclick: () => promptRename(d) }, nameOf(d)),
         el("span", { class: "os" }, d.os),
-        el("span", { class: "seen" }, d.online ? "online" : agoLabel(d.last_seen))
+        el("span", { class: "seen", "data-ago": d.online ? null : String(d.last_seen) }, d.online ? "online" : agoLabel(d.last_seen))
       )
     );
 
-    const left = (exp) => (exp > 0 ? ` (${Math.max(0, Math.round(exp - Date.now() / 1000))}s)` : "");
     if ((d.blocked && d.blocked.length) || (d.blockedSites && d.blockedSites.length)) {
       const chips = el("div", { class: "chips" });
-      (d.blocked || []).forEach((b) => chips.append(el("span", { class: "chip" }, `⛔ ${b.pattern}${left(b.expires_at)}`)));
-      (d.blockedSites || []).forEach((b) => chips.append(el("span", { class: "chip site" }, `🌐 ${b.domain}${left(b.expires_at)}`)));
+      (d.blocked || []).forEach((b) => chips.append(blockChip("⛔", b.pattern, b.expires_at)));
+      (d.blockedSites || []).forEach((b) => chips.append(blockChip("🌐", b.domain, b.expires_at, "site")));
       card.append(chips);
       if (d.blockedSites && d.blockedSites.length && d.sitesAvailable === false)
         card.append(el("div", { class: "warn" }, "⚠ Website blocks need the agent to run as Administrator on this computer."));
@@ -1119,39 +1368,115 @@
         el("button", { class: "btn sm", onclick: () => command(t, "unblock_all", {}) }, "Unblock all"),
         el("button", { class: "btn sm", onclick: () => command(t, "pause", { text: "Paused by your instructor — eyes up front." }) }, "⏸ Pause"),
         el("button", { class: "btn sm", onclick: () => command(t, "resume", {}) }, "▶ Resume"),
-        el("button", { class: "btn sm danger", onclick: () => promptWarn(dispatch, "this student") }, "⚠ Full-screen…"),
         el("button", { class: "btn sm", onclick: () => command(t, "close_tab", {}) }, "Close tab"),
         el("button", { class: "btn sm", onclick: () => command(t, "minimize_all", {}) }, "Minimize"),
-        el("button", { class: "btn sm", onclick: () => promptMessage(t) }, "Message…"),
+        el("button", { class: "btn sm", onclick: () => promptMessage(t) }, "✉ Message / Lock…"),
         el("button", { class: "btn sm ghost", onclick: () => command(t, "list_now", {}) }, "Refresh")
       )
     );
     return card;
   }
 
-  function promptKill(t) {
-    const n = prompt("Close which app? (name or part of it, e.g. chrome, steam)");
+  async function promptKill(t) {
+    const n = await modalPrompt({
+      title: "Close an app",
+      label: "Close which app?",
+      placeholder: "name or part of it, e.g. chrome, steam",
+      okText: "Close app",
+    });
     if (n && n.trim()) command(t, "kill_process", { pattern: n.trim() });
   }
-  function promptMessage(t) {
-    promptMessageTimed((a, p) => command(t, a, p), "the student screen");
+
+  // Unified "Send to screen(s)" composer — combines the old Message… and
+  // Full-screen… into one real dialog. Two styles:
+  //   • Pop-up message — a dismissible note; optionally lock the OK button for a
+  //     few seconds, and/or auto-dismiss after a while.
+  //   • Lock the screen — a full-screen cover that stays until you Resume (or
+  //     auto-resumes after a set number of minutes). `runner(action, params)`
+  //     sends the resulting command to the right target.
+  function openMessageComposer(runner, where) {
+    let style = "message";
+    const text = el("textarea", { class: "modal-input", rows: "3", placeholder: "Type what students should see…" });
+
+    const holdSel = el(
+      "select",
+      { class: "modal-input" },
+      ...[[0, "They can close it right away"], [5, "Lock OK for 5s"], [10, "Lock OK for 10s"], [20, "Lock OK for 20s"], [30, "Lock OK for 30s"]].map(([v, t]) => el("option", { value: v }, t))
+    );
+    const autoCloseSel = el(
+      "select",
+      { class: "modal-input" },
+      ...[[0, "Stay until they close it"], [10, "Auto-close after 10s"], [30, "Auto-close after 30s"], [60, "Auto-close after 1 min"], [180, "Auto-close after 3 min"]].map(([v, t]) => el("option", { value: v }, t))
+    );
+    const autoResumeSel = el(
+      "select",
+      { class: "modal-input" },
+      ...[[0, "Stays until I press Resume"], [1, "Auto-resume after 1 min"], [2, "Auto-resume after 2 min"], [5, "Auto-resume after 5 min"], [10, "Auto-resume after 10 min"]].map(([v, t]) => el("option", { value: v }, t))
+    );
+
+    const msgOpts = el(
+      "div",
+      { class: "composer-opts" },
+      el("label", { class: "modal-label" }, "Before they can dismiss it"),
+      holdSel,
+      el("label", { class: "modal-label" }, "Auto-dismiss"),
+      autoCloseSel
+    );
+    const lockOpts = el(
+      "div",
+      { class: "composer-opts" },
+      el("label", { class: "modal-label" }, "How long to lock the screen"),
+      autoResumeSel,
+      el("p", { class: "modal-hint" }, "The cover reopens if a student closes it, so it holds attention until it lifts.")
+    );
+
+    function applyStyle() {
+      msgOpts.style.display = style === "message" ? "" : "none";
+      lockOpts.style.display = style === "lock" ? "" : "none";
+      for (const b of styleBtns) b.classList.toggle("active", b.dataset.style === style);
+    }
+    const styleBtns = [
+      el("button", { class: "seg-btn", "data-style": "message", type: "button", onclick: () => { style = "message"; applyStyle(); } }, "💬 Pop-up message"),
+      el("button", { class: "seg-btn", "data-style": "lock", type: "button", onclick: () => { style = "lock"; applyStyle(); } }, "🔒 Lock the screen"),
+    ];
+
+    const send = () => {
+      const t = text.value.trim();
+      if (!t) {
+        text.focus();
+        return;
+      }
+      if (style === "lock") {
+        const mins = parseInt(autoResumeSel.value, 10) || 0;
+        runner("pause", { text: t, duration_sec: mins > 0 ? mins * 60 : 0 });
+        toast(mins > 0 ? `Screen locked (auto-resumes in ${mins} min).` : "Screen locked — press Resume to lift.");
+      } else {
+        runner("message", { text: t, hold_sec: parseInt(holdSel.value, 10) || 0, auto_close_sec: parseInt(autoCloseSel.value, 10) || 0 });
+        toast("Message sent.");
+      }
+      m.close();
+    };
+
+    const body = el(
+      "div",
+      { class: "composer" },
+      el("div", { class: "modal-hint tight" }, `Showing on ${where}.`),
+      el("div", { class: "seg composer-seg" }, ...styleBtns),
+      el("label", { class: "modal-label" }, "Message"),
+      text,
+      msgOpts,
+      lockOpts
+    );
+    const m = openModal({
+      title: "Send to screen",
+      body,
+      actions: [el("button", { class: "btn ghost", onclick: () => m.close() }, "Cancel"), el("button", { class: "btn primary", onclick: send }, "Send")],
+      width: "520px",
+    });
+    applyStyle();
+    setTimeout(() => text.focus(), 40);
   }
-  // Full-screen message that the student can't dismiss until a hold timer elapses
-  // (then the OK button unlocks). `runner(action, params)` sends it. Default 10s.
-  function promptMessageTimed(runner, where) {
-    const txt = prompt(`Full-screen message to show on ${where}:`);
-    if (!txt || !txt.trim()) return;
-    const secStr = prompt("Lock it on screen for how many seconds before they can click OK? (0 = OK right away)", "10");
-    if (secStr === null) return;
-    const secs = parseInt(secStr, 10);
-    runner("message", { text: txt.trim(), timeout_sec: Number.isNaN(secs) || secs < 0 ? 10 : secs });
-  }
-  // Full-screen warning: covers the screen and reopens if the student closes it,
-  // until the instructor hits Resume. `runner(action, params)` sends it.
-  function promptWarn(runner, where) {
-    const txt = prompt(`Full-screen warning for ${where} (stays until you press Resume):`, "Eyes up front, please.");
-    if (txt && txt.trim()) runner("pause", { text: txt.trim() });
-  }
+  const promptMessage = (t) => openMessageComposer((a, p) => command(t, a, p), "this student's screen");
 
   // -------------------------------------------------------------------- admin
   function renderAdmin() {
@@ -1177,16 +1502,19 @@
   const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const allApps = () => [...new Set(BLOCK_PRESETS.flatMap((p) => p.apps))];
   const allSites = () => [...new Set(BLOCK_PRESETS.flatMap((p) => p.sites))];
+  const allExcludes = () => [...new Set(BLOCK_PRESETS.flatMap((p) => p.exclude || []))];
+  // build(opts) — opts.text (message text) and opts.pauseMin (auto-resume minutes
+  // for a timed pause; 0 = stays until a Resume event or manual resume).
   const EVENT_TYPES = [
-    { id: "pause", label: "Pause computers (full-screen)", build: () => [{ action: "pause", params: { text: "Paused by your instructor — eyes up front." } }] },
+    { id: "pause", label: "Pause computers (full-screen)", usesPause: true, build: (o) => [{ action: "pause", params: { text: "Paused by your instructor — eyes up front.", duration_sec: o.pauseMin > 0 ? o.pauseMin * 60 : 0 } }] },
     { id: "resume", label: "Resume (end pause)", build: () => [{ action: "resume" }] },
-    { id: "block_roblox", label: "Block Roblox", build: () => [{ action: "block_app", params: { patterns: ["roblox"] } }, { action: "block_site", params: { domains: ["roblox.com"] } }] },
-    { id: "block_all", label: "Block all games + sites", build: () => [{ action: "block_app", params: { patterns: allApps() } }, { action: "block_site", params: { domains: allSites() } }] },
+    { id: "block_roblox", label: "Block Roblox (Player)", build: () => [{ action: "block_app", params: { patterns: ["roblox"], exclude: ["studio"] } }, { action: "block_site", params: { domains: ["roblox.com"] } }] },
+    { id: "block_all", label: "Block all games + sites", build: () => [{ action: "block_app", params: { patterns: allApps(), exclude: allExcludes() } }, { action: "block_site", params: { domains: allSites() } }] },
     { id: "minimize_all", label: "Minimize all windows", build: () => [{ action: "minimize_all" }] },
     { id: "close_tab", label: "Close current tab", build: () => [{ action: "close_tab" }] },
     { id: "close_browsers", label: "Close all browsers", build: () => [{ action: "close_browsers" }] },
     { id: "unblock", label: "Unblock everything", build: () => [{ action: "unblock_all" }] },
-    { id: "message", label: "Full-screen message (10s hold)", build: (text) => [{ action: "message", params: { text: text || "", timeout_sec: 10 } }] },
+    { id: "message", label: "Full-screen message (10s hold)", usesMsg: true, build: (o) => [{ action: "message", params: { text: o.text || "", hold_sec: 10 } }] },
   ];
   const ACTION_LABEL = { pause: "Pause", resume: "Resume", block_app: "Block apps", block_site: "Block sites", unblock_all: "Unblock", close_browsers: "Close browsers", close_tab: "Close tab", minimize_all: "Minimize", message: "Message", kill_process: "Close app" };
 
@@ -1258,7 +1586,11 @@
     if (!schedules.length) tb.append(el("tr", {}, el("td", { colspan: "7", class: "empty" }, "No scheduled events yet.")));
     for (const s of schedules) {
       const daysTxt = s.days && s.days.length ? s.days.slice().sort().map((d) => DOW[d]).join(" ") : "Every day";
-      const does = [...new Set((s.commands || []).map((c) => ACTION_LABEL[c.action] || c.action))].join(", ");
+      const does = [...new Set((s.commands || []).map((c) => {
+        const base = ACTION_LABEL[c.action] || c.action;
+        if (c.action === "pause" && c.params && c.params.duration_sec > 0) return `${base} ${Math.round(c.params.duration_sec / 60)}m`;
+        return base;
+      }))].join(", ");
       tb.append(
         el(
           "tr",
@@ -1269,7 +1601,7 @@
           el("td", {}, daysTxt),
           el("td", {}, targetsLabel(s)),
           el("td", {}, does),
-          el("td", {}, el("button", { class: "btn ghost sm danger", onclick: () => confirm(`Delete event “${s.name}”?`) && org({ op: "deleteSchedule", id: s.id }) }, "Delete"))
+          el("td", {}, el("button", { class: "btn ghost sm danger", onclick: () => modalConfirm(`Delete event “${s.name}”?`, { title: "Delete event", danger: true, okText: "Delete" }).then((ok) => ok && org({ op: "deleteSchedule", id: s.id })) }, "Delete"))
         )
       );
     }
@@ -1291,15 +1623,28 @@
       dayBtns.append(b);
     });
     const targetPicker = buildTargetPicker();
-    const typeSel = el("select", {}, ...EVENT_TYPES.map((t) => el("option", { value: t.id }, t.label)));
-    const msgI = el("input", { placeholder: "Message text (only for “Show a message”)" });
+    // Pause-duration field appears only for the Pause event; message field only
+    // for the Message event — so the form stays uncluttered.
+    const pauseMinI = el("input", { type: "number", min: "0", step: "1", value: "0", placeholder: "0 = until Resume" });
+    const pauseField = fieldInline("Pause for (min)", pauseMinI);
+    const msgI = el("input", { placeholder: "Message text" });
+    const msgField = fieldInline("Message", msgI);
+    const typeSel = el("select", {
+      onchange: () => {
+        const et = EVENT_TYPES.find((t) => t.id === typeSel.value);
+        pauseField.style.display = et && et.usesPause ? "" : "none";
+        msgField.style.display = et && et.usesMsg ? "" : "none";
+      },
+    }, ...EVENT_TYPES.map((t) => el("option", { value: t.id }, t.label)));
     const addBtn = el("button", { class: "btn primary sm", onclick: () => {
       const targets = targetPicker.getTargets();
       if (!targets.length) return toast("Tick at least one class, building, or campus.");
       const et = EVENT_TYPES.find((t) => t.id === typeSel.value) || EVENT_TYPES[0];
-      org({ op: "addSchedule", name: nameI.value.trim() || "Event", time: timeI.value || "12:00", days: dayState.slice(), targets, commands: et.build(msgI.value.trim()), enabled: true });
+      const opts = { text: msgI.value.trim(), pauseMin: Math.max(0, parseInt(pauseMinI.value, 10) || 0) };
+      org({ op: "addSchedule", name: nameI.value.trim() || "Event", time: timeI.value || "12:00", days: dayState.slice(), targets, commands: et.build(opts), enabled: true });
       nameI.value = "";
       msgI.value = "";
+      pauseMinI.value = "0";
       dayState.length = 0;
       [...dayBtns.children].forEach((c) => c.classList.remove("active"));
       targetPicker.reset();
@@ -1312,11 +1657,17 @@
         { class: "sched-form" },
         el("div", { class: "sched-row" }, fieldInline("Name", nameI), fieldInline("Time", timeI)),
         el("div", { class: "sched-row" }, fieldInline("Days (none = every day)", dayBtns)),
-        el("div", { class: "sched-row" }, fieldInline("Event", typeSel), fieldInline("Message", msgI)),
+        el("div", { class: "sched-row" }, fieldInline("Event", typeSel), pauseField, msgField),
         el("div", { class: "sched-row" }, fieldInline("Applies to (tick any campuses / buildings / classes)", targetPicker.node)),
         el("div", { class: "sched-row" }, addBtn)
       )
     );
+    // set initial field visibility for the default (first) event type
+    (() => {
+      const et = EVENT_TYPES.find((t) => t.id === typeSel.value);
+      pauseField.style.display = et && et.usesPause ? "" : "none";
+      msgField.style.display = et && et.usesMsg ? "" : "none";
+    })();
 
     return section("Scheduled events (daily)", body, el("span", { class: "muted small" }, "Runs on the hub clock"));
   }
@@ -1450,10 +1801,10 @@
     const devs = deviceList();
     const table = el("table", { class: "dev-table" });
     table.append(
-      el("thead", {}, el("tr", {}, el("th", {}, "Computer"), el("th", {}, "Location"), el("th", {}, "Building"), el("th", {}, "Status"), el("th", {}, "Assigned class")))
+      el("thead", {}, el("tr", {}, el("th", {}, "Computer"), el("th", {}, "Location"), el("th", {}, "Building"), el("th", {}, "Status"), el("th", {}, "Assigned class"), el("th", {}, "")))
     );
     const tbody = el("tbody", {});
-    if (!devs.length) tbody.append(el("tr", {}, el("td", { colspan: "5", class: "empty" }, "No computers have checked in yet.")));
+    if (!devs.length) tbody.append(el("tr", {}, el("td", { colspan: "6", class: "empty" }, "No computers have checked in yet.")));
     devs
       .sort((a, b) => nameOf(a).toLowerCase().localeCompare(nameOf(b).toLowerCase()))
       .forEach((d) => {
@@ -1469,9 +1820,27 @@
         const nameInput = el("input", {
           class: "dev-rename",
           value: d.customName || "",
-          placeholder: d.hostname,
+          placeholder: defaultNameOf(d),
           onchange: (e) => rename(d.device_id, e.target.value.trim()),
         });
+        const removeBtn = el(
+          "button",
+          {
+            class: "btn ghost sm danger",
+            title: "Stop monitoring on this computer and remove it from the list",
+            onclick: () =>
+              modalConfirm(
+                `Remove “${nameOf(d)}” from the list? This tells that laptop to stop iD Tech Watch (both processes) and forgets it. It reappears only if someone starts it again.`,
+                { title: "Remove computer", danger: true, okText: "Stop & remove" }
+              ).then((ok) => {
+                if (ok) {
+                  removeDevice(d.device_id);
+                  toast(`Stopping & removing ${nameOf(d)}…`);
+                }
+              }),
+          },
+          "Remove"
+        );
         tbody.append(
           el(
             "tr",
@@ -1480,7 +1849,8 @@
             el("td", {}, loc ? loc.name : "—"),
             el("td", {}, f ? f.b.name : "—"),
             el("td", {}, el("span", { class: "status " + (d.online ? "on" : "off") }, d.online ? "Online" : agoLabel(d.last_seen))),
-            el("td", {}, sel)
+            el("td", {}, sel),
+            el("td", { class: "row-actions" }, removeBtn)
           )
         );
       });
@@ -1525,7 +1895,7 @@
   }
 
   function confirmDel(kind, name, fn) {
-    if (confirm(`Delete ${kind} “${name}”? This also removes anything inside it.`)) fn();
+    modalConfirm(`Delete ${kind} “${name}”? This also removes anything inside it.`, { title: `Delete ${kind}`, danger: true, okText: "Delete" }).then((ok) => ok && fn());
   }
 
   // ============================================================ deep links / url
@@ -1747,9 +2117,10 @@
   }
 
   // ================================================================== startup
-  // live "x ago" ticker — grid monitor only (skip canvas/drags & admin inputs)
+  // live "x ago" + block-countdown ticker — updates just those text nodes in
+  // place (no full rebuild), so the grid doesn't flash every second.
   setInterval(() => {
-    if (nav.view === "monitor" && nav.classId && ui.monitorMode === "grid" && !ui.dragging && !busyEditing() && !scrolling()) render();
+    if (nav.view === "monitor" && nav.classId && !ui.dragging && !busyEditing() && !scrolling()) refreshLiveLabels();
   }, 1000);
 
   applyTheme(); // set light/dark before first paint

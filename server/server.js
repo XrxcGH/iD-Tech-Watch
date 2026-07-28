@@ -344,6 +344,9 @@ function registerAgent(ws, info) {
   devices.set(deviceId, {
     device_id: deviceId,
     hostname: info.hostname || deviceId,
+    // display name entered at setup — seeds what shows on the monitor. A
+    // dashboard rename (deviceNames) overrides it; this is just the default.
+    agentName: (info.name != null ? String(info.name).trim().slice(0, 40) : "") || prev.agentName || "",
     os: info.os || "unknown",
     locationId,
     buildingId,
@@ -424,6 +427,34 @@ function disconnectAgent(ws) {
   return deviceId;
 }
 
+// Decommission a laptop: ask its agent to stop iD Tech Watch (which drops
+// stop.flag so the watchdog stops BOTH the agent and its guardian), then forget
+// the device everywhere. If the agent is offline we can't reach it, but we still
+// remove it from the list. It only comes back if someone starts it again.
+function removeDeviceById(id) {
+  id = String(id || "");
+  if (!id) return;
+  const ws = agentWs.get(id);
+  if (ws) {
+    try {
+      ws.sendJSON({ type: "command", action: "stop_watch", params: {} });
+    } catch (_) {}
+    // close the socket shortly after so it can't re-register before it exits
+    setTimeout(() => {
+      try {
+        ws.close();
+      } catch (_) {}
+    }, 1500);
+    wsDevice.delete(ws);
+  }
+  agentWs.delete(id);
+  devices.delete(id);
+  delete config.assignments[id];
+  delete config.deviceNames[id];
+  saveConfig();
+  console.log(`[hub] removed device ${id}${ws ? " (sent stop_watch)" : " (was offline)"}`);
+}
+
 // ---- state broadcast -----------------------------------------------------
 function orgView() {
   // strip internal aliases from what we ship to the browser
@@ -452,6 +483,7 @@ function devicesView() {
       device_id: rec.device_id,
       hostname: rec.hostname,
       customName: config.deviceNames[rec.device_id] || "",
+      agentName: rec.agentName || "",
       os: rec.os,
       locationId: rec.locationId,
       buildingId: rec.buildingId,
@@ -697,6 +729,23 @@ function handleAgent(ws) {
     if (msg.type === "status") {
       updateDevice(ws, msg);
       broadcastState();
+    } else if (msg.type === "exec_result") {
+      // result of an admin's run_command — relay to admin dashboards only
+      const deviceId = wsDevice.get(ws);
+      const rec = deviceId && devices.get(deviceId);
+      const out = {
+        type: "exec_result",
+        device_id: deviceId,
+        name: (rec && (config.deviceNames[deviceId] || rec.hostname)) || deviceId,
+        request_id: msg.request_id || "",
+        ok: !!msg.ok,
+        code: msg.code,
+        stdout: String(msg.stdout || "").slice(0, 8000),
+        stderr: String(msg.stderr || "").slice(0, 4000),
+      };
+      let fwd = 0;
+      for (const dws of [...dashboards]) if (!dws.closed && dws.role === "admin") { dws.sendJSON(out); fwd++; }
+      console.log(`[hub] exec_result from ${deviceId} -> forwarded to ${fwd} admin dashboard(s)`);
     }
   };
   ws.onclose = () => {
@@ -734,6 +783,12 @@ function handleDashboard(ws) {
     }
 
     if (msg.type === "command") {
+      // run_command is arbitrary remote code — restrict it to admins (the agent
+      // additionally requires IDT_ALLOW_EXEC=1 to honor it at all).
+      if (msg.action === "run_command" && ws.role !== "admin") {
+        ws.sendJSON({ type: "error", detail: "admin required to run commands" });
+        return;
+      }
       const sent = sendCommand(msg.target || {}, msg.action, msg.params);
       ws.sendJSON({ type: "ack", action: msg.action, sent });
     } else if (msg.type === "org") {
@@ -753,6 +808,14 @@ function handleDashboard(ws) {
     } else if (msg.type === "rename") {
       // rename a computer to the student's name — any authenticated instructor
       applyRename(msg.deviceId, msg.name);
+      broadcastState();
+    } else if (msg.type === "removeDevice") {
+      // decommission a laptop: tell it to stop iD Tech Watch, then forget it.
+      if (ws.role !== "admin") {
+        ws.sendJSON({ type: "error", detail: "admin required" });
+        return;
+      }
+      removeDeviceById(msg.deviceId);
       broadcastState();
     }
   };
@@ -933,10 +996,29 @@ function keepAwake() {
   }
 }
 
-// Fire scheduled events (daily timed closures/pauses/etc). Checks every 20s;
-// the per-minute lastFired stamp prevents double-firing within a minute.
+// Fire scheduled events (daily timed closures/pauses/etc). Checks every 5s so a
+// target minute is never missed; the per-minute lastFired stamp prevents
+// double-firing within that minute. A timed PAUSE with a duration auto-resumes:
+// the agent ends its own overlay locally, and the hub also sends a resume after
+// the duration so the whole class lifts together (and any agent that reconnected
+// mid-pause is released too).
 function pad2(n) {
   return String(n).padStart(2, "0");
+}
+function fireScheduleCommands(s, targets) {
+  for (const t of targets) {
+    for (const c of s.commands || []) {
+      sendCommand(t, c.action, c.params);
+      const dur = c.action === "pause" && c.params ? Math.round(Number(c.params.duration_sec) || 0) : 0;
+      if (dur > 0) {
+        const target = t;
+        setTimeout(() => {
+          const n = sendCommand(target, "resume", {});
+          console.log(`[hub] timed pause "${s.name}" auto-resumed after ${dur}s -> ${n} computer(s)`);
+        }, dur * 1000);
+      }
+    }
+  }
 }
 function checkSchedules() {
   const now = new Date();
@@ -952,7 +1034,7 @@ function checkSchedules() {
     s.lastFired = stamp;
     changed = true;
     const targets = s.targets && s.targets.length ? s.targets : [s.target || { scope: "all" }];
-    for (const t of targets) for (const c of s.commands || []) sendCommand(t, c.action, c.params);
+    fireScheduleCommands(s, targets);
     console.log(`[hub] fired scheduled event "${s.name}" -> ${targets.length} target(s) (${(s.commands || []).map((c) => c.action).join(", ")})`);
   }
   if (changed) {
@@ -962,7 +1044,7 @@ function checkSchedules() {
 }
 
 loadConfig();
-setInterval(checkSchedules, 20000);
+setInterval(checkSchedules, 5000);
 if (process.env.IDT_KEEP_AWAKE === "1") keepAwake();
 server.listen(PORT, HOST, () => {
   if (ENROLL_TOKEN) console.log("[hub] enrollment token required for agents");

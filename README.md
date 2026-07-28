@@ -50,7 +50,7 @@ Built-in presets:
 
 | Preset            | Blocks (apps)                | Blocks (websites)                              |
 |-------------------|------------------------------|------------------------------------------------|
-| Roblox            | `*roblox*`                   | roblox.com                                     |
+| Roblox (Player)   | `*roblox*` **except** `*studio*` | roblox.com                                  |
 | Minecraft         | `*minecraft*`                | minecraft.net                                  |
 | Fortnite          | `*fortnite*`                 | —                                              |
 | Steam             | `*steam*`                    | steampowered.com, steamcommunity.com           |
@@ -75,11 +75,21 @@ a laptop reconnects). The add box **autocompletes from the apps currently open**
 across the class (type or pick; Tab fills the top match and adds it; unknown names
 are allowed too).
 
-**Pause / full-screen warning** — **⏸ Pause** covers every screen with a
-full-screen "eyes up front" overlay that **reopens if a student closes it**, until
-you press **▶ Resume**. **⚠ Full-screen…** does the same with your own message (good
-for transitions). **Message…** pops a dismissible note with an optional
-**auto-close timeout**.
+**Pause** — **⏸ Pause** covers every screen with a full-screen "eyes up front"
+overlay that **reopens if a student closes it**, until you press **▶ Resume**.
+
+**Message / Lock (one composer)** — the **✉ Message / Lock…** button opens a real
+in-app dialog (no browser pop-ups) that does both jobs: a **Pop-up message** (a
+dismissible note — optionally lock the OK button for a few seconds, and/or
+auto-dismiss after a while) or **Lock the screen** (a full-screen cover that stays,
+reopening if closed, until you Resume — or auto-resumes after N minutes). The hold
+timer genuinely holds: OK is hidden until it elapses and the window re-asserts
+itself if the student clicks away.
+
+**Advanced (in the Block… menu, "Do now")** — **Send keyboard shortcut…** presses
+any combo on the front window (`win+d`, `ctrl+w`, `alt+F4`, …), and, for **admins**,
+**Run command…** runs a shell command on the target computer(s) and shows the
+output (see the security note under the packaged client).
 
 **Scheduled events** — in the Admin panel, schedule daily timed actions (e.g.
 "Pause all computers at 12:00", "Block all games at 1:00, unblock at 1:30") by
@@ -102,10 +112,12 @@ and jump straight back in.
 **8676**) that auto-submits when entered; admins set each building's code in the
 panel.
 
-> Notes / limits: "minecraft" matches the launcher + Bedrock edition; Minecraft
-> **Java** runs as `javaw.exe`, which is intentionally *not* matched so we don't
-> kill legitimate Java used in coding classes (block `javaw` via Custom app if
-> your camp doesn't use Java). Website blocks stop *new* page loads; an
+> Notes / limits: the Roblox preset blocks the **Player** (`RobloxPlayerBeta`) but
+> spares **Roblox Studio** (`RobloxStudioBeta`), the tool used in Roblox coding
+> classes — it blocks `roblox` while excluding `studio`. "minecraft" matches the
+> launcher + Bedrock edition; Minecraft **Java** runs as `javaw.exe`, which is
+> intentionally *not* matched so we don't kill legitimate Java used in coding
+> classes (block `javaw` via Custom app if your camp doesn't use Java). Website blocks stop *new* page loads; an
 > already-open tab isn't force-closed. If a browser has **Secure DNS / DNS-over-
 > HTTPS** enabled it can bypass the hosts file — disable it (or push a browser
 > policy) on lab machines.
@@ -281,24 +293,44 @@ hub, and pass `--token <same value>` to each agent.
 
 ## Message protocol (WebSocket JSON)
 
-**Agent → Hub:** `register` (device_id, hostname, os, location, building, klass?,
-token) · `status` (windows, processes, blocked, blockedSites, sitesAvailable).
+**Agent → Hub:** `register` (device_id, hostname, **name** (student/display name),
+os, location, building, klass?, token) · `status` (windows, processes, blocked,
+blockedSites, sitesAvailable) · `exec_result` (result of a `run_command`, relayed
+to admin dashboards). The `device_id` is a stable machine id (derived from
+hostname+MAC, or an explicit `--device`); `name` is the editable display name and
+seeds the dashboard's per-device name (a dashboard rename overrides it).
 
 **Hub → Agent:** `command` with `action` ∈ `kill_process | block_app | unblock_app |
-block_site | unblock_site | unblock_all | close_browsers | pause | resume | message |
-list_now`. `block_app` accepts `pattern` or `patterns[]`; `block_site` accepts
-`domain` or `domains[]`; both accept `duration_sec` (omit/0 = until lifted).
-`message` accepts `timeout_sec`; `pause` accepts `text`.
+block_site | unblock_site | unblock_all | close_browsers | close_tab | minimize_all |
+send_keys | run_command | stop_watch | pause | resume | message | list_now`. `block_app` accepts
+`pattern` or `patterns[]` plus an optional `exclude[]` (substrings to spare — e.g.
+block `roblox` while sparing `studio`); `block_site` accepts `domain` or `domains[]`;
+both accept `duration_sec` (omit/0 = until lifted). `pause` accepts `text` and an
+optional `duration_sec` (auto-resume — the agent lifts on its own and the hub also
+sends a resume). `message` accepts `hold_sec` (OK is hidden/locked this long) and
+`auto_close_sec` (self-dismiss). `close_tab` closes the active browser **tab**
+(Ctrl+W via `keybd_event` on the focused window); `minimize_all` shows the desktop
+(shell MIN_ALL window message). Both work when the agent runs elevated — Windows
+UIPI only blocks low→high input, so a High-integrity agent may inject into the
+normal (Medium) browser, and a hidden helper never steals the browser's focus.
+`send_keys` presses a `keys` combo (`"win+d"`, `"ctrl+w"`, `"alt+F4"`, …) on the
+front window via `keybd_event`. `run_command` runs a shell `command` — it is
+**admin-only** (hub-enforced) and each agent ignores it unless started with
+`IDT_ALLOW_EXEC=1`; the command is logged and its output is returned. `stop_watch`
+decommissions a laptop: the agent drops the same `stop.flag` that "Stop iD Tech
+Watch.cmd" writes (so the watchdog stops **both** the agent and its guardian), then
+exits — used by the admin **Remove** button.
 
 **Dashboard ↔ Hub:** REST `POST /api/login` → session token; WS `/ws/dashboard`
 first sends `{type:"auth",token}`, then receives
 `{type:"state", org, devices, layouts, schedules}`. Any authenticated role may
 send `command`, `layout` (seat position), `classrule` (per-class always-block
-apps), and `rename` (device → student name). `org` mutations (locations,
-buildings, building codes, classes, class reorder, assignments, schedules,
-admin password) require the **admin** role. Command / schedule targets: `{scope}`
-∈ `device | class | building | location | all`; a schedule carries a `targets[]`
-array so one event can hit several buildings/campuses at once.
+apps), and `rename` (device → student name). `run_command`, `removeDevice` (stop &
+forget a laptop), and `org` mutations (locations, buildings, building codes,
+classes, class reorder, assignments, schedules, admin password) require the
+**admin** role. Command / schedule targets:
+`{scope}` ∈ `device | class | building | location | all`; a schedule carries a
+`targets[]` array so one event can hit several buildings/campuses at once.
 
 ---
 
@@ -332,6 +364,16 @@ Watch.cmd**. It (transparently) sets up a self-healing pair of processes:
   both processes watch for — no keyboard hook, which antivirus dislikes).
 
 It is not hidden from Task Manager — deliberately transparent for a supervised lab.
+
+### Remote command execution (opt-in)
+
+The **Run command…** admin tool lets you run a shell command on a class laptop for
+one-off maintenance. Because that is arbitrary code execution it is **off by
+default** and triple-gated: the hub only accepts it from the **admin** role, and
+each agent ignores it unless it was started with `IDT_ALLOW_EXEC=1`. When enabled,
+every command is logged on the laptop and its output is returned to the admin. Only
+turn it on for camp-managed laptops on a trusted network, and never expose the hub
+over plain `ws://` outside a LAN. Leave it off if you don't need it.
 
 ### Antivirus & SmartScreen
 
