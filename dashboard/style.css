@@ -12,6 +12,7 @@
 
 :root,
 :root[data-theme="light"] {
+  color-scheme: light;
   --id-green: #94d60a;
   --id-green-dark: #7ab705;
   --brand-ink: #3f6d00;
@@ -38,22 +39,23 @@
  * adapted to this build's fuller variable set. Warm greys, iD-green + gruvbox
  * yellow accents. This is the default view (see app.js theme default). */
 :root[data-theme="dark"] {
-  --id-green: #b8bb26; /* gruvbox bright green */
-  --id-green-dark: #98971a;
-  --brand-ink: #d8db4b; /* readable green-on-dark */
-  --id-green-soft: rgba(184, 187, 38, 0.14);
+  color-scheme: dark; /* native time/date pickers, selects & spinners render dark */
+  --id-green: #94d60a; /* iD green — same as light mode */
+  --id-green-dark: #7ab705;
+  --brand-ink: #a6e61a; /* slightly brighter green reads better on dark surfaces */
+  --id-green-soft: rgba(148, 214, 10, 0.15);
   --ink: #ebdbb2; /* gruvbox fg */
   --muted: #a89984;
   --line: #504945;
   --bg: #1d2021; /* gruvbox hard bg */
   --bg-2: #282828; /* gruvbox bg0 */
   --card: #282828;
-  --ok: #b8bb26;
-  --ok-dot: #b8bb26;
+  --ok: #94d60a;
+  --ok-dot: #94d60a;
   --off: #7c6f64;
   --danger: #fb4934;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 24px rgba(0, 0, 0, 0.45);
-  --glow: 0 0 0 1px rgba(184, 187, 38, 0.4), 0 6px 26px rgba(184, 187, 38, 0.22);
+  --glow: 0 0 0 1px rgba(148, 214, 10, 0.4), 0 6px 26px rgba(148, 214, 10, 0.22);
   --grid-line: rgba(235, 219, 178, 0.06);
   --topbar: rgba(40, 40, 40, 0.86);
   --chip-neutral: rgba(235, 219, 178, 0.1);
@@ -1071,34 +1073,71 @@ details.apps .procs {
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: min(440px, 92vw);
-  max-height: 86vh;
+  width: min(600px, 94vw);
+  max-height: 88vh;
   overflow: auto;
   background: var(--card);
+  border: 1px solid var(--line);
   border-radius: 16px;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.35);
-  padding: 16px;
+  box-shadow: var(--shadow);
+  padding: 20px 22px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 .sheet-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 .sheet-title {
   font-weight: 700;
-  font-size: 16px;
+  font-size: 18px;
 }
 .sheet-sub {
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--muted);
 }
+/* even, readable action buttons in a grid so labels/dropdowns never truncate */
 .sheet-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+.sheet-actions .btn,
+.sheet-actions .block-select {
+  width: 100%;
+  justify-content: center;
+  padding: 9px 12px;
+  font-size: 13.5px;
+}
+.sheet-actions .blockmenu {
+  display: block;
+}
+.sheet .list.windows {
+  max-height: 30vh;
+}
+
+/* seating lock toggle + custom-duration row */
+.lock-btn.locked {
+  border-color: var(--id-green);
+  color: var(--brand-ink);
+  background: var(--id-green-soft);
+}
+.room-wrap.locked .seat {
+  cursor: pointer;
+}
+.dur-custom-row {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
+  align-items: center;
+}
+.dur-custom-row input {
+  flex: 1 1 auto;
+}
+.dur-custom-row select {
+  flex: 0 0 auto;
+  width: auto;
 }
 @media (max-width: 640px) {
   .sheet {
