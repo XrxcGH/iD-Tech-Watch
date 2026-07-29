@@ -49,7 +49,7 @@ const IS_MAC = process.platform === "darwin";
 
 // Build stamp — logged on startup so you can confirm which agent version a
 // laptop is actually running (see watch-client.log in the install folder).
-const BUILD = "2026-07-28 active-window · minimize-toggle · screen-view";
+const BUILD = "2026-07-28 pause-lock · remote-update · screen-view";
 
 const ENFORCE_INTERVAL_MS = 2000; // how often to sweep the blocklists
 const STATUS_INTERVAL_DEFAULT = 4; // seconds between status reports
@@ -771,20 +771,73 @@ function pauseScreen(text, durationSec) {
   log("screen paused");
 }
 
+// A hardened full-screen "eyes up front" lock. Kids were escaping the old
+// overlay via Alt+Tab, minimize (from Task Manager), and Win+Ctrl+→ (virtual
+// desktop switch). This version:
+//   • is NOT in the taskbar and snaps back to Maximized if anything minimizes it;
+//   • re-grabs the foreground whenever it loses focus (defeats Alt+Tab) and on a
+//     250ms timer (defeats desktop switches and "TM on top");
+//   • installs a low-level keyboard hook WHILE PAUSED that suppresses the Windows
+//     keys (kills Win+Ctrl+Arrow, Win+D/Tab/M/R), Alt+Tab/Alt+Esc, and Ctrl+Esc /
+//     Ctrl+Shift+Esc (Start menu / Task Manager). The hook only suppresses — it
+//     never logs a key — and is removed the instant the pause ends.
+//   • a 30-minute failsafe auto-closes it so a lock can never get stuck.
+// NOTE: Ctrl+Alt+Del is a kernel Secure Attention Sequence and cannot be blocked
+// from user mode; and a global keyboard hook can trip some AV heuristics (it's
+// transient + suppress-only here). Full lockdown would need an MDM kiosk policy.
 function spawnPauseWindow() {
   if (pauseChild || !pauseActive) return;
   if (!IS_WIN) return pauseScreen(pauseMessage);
   const safe = pauseMessage.replace(/'/g, "''");
-  const ps =
+  const csharp = [
+    "using System;",
+    "using System.Runtime.InteropServices;",
+    "public static class IDTLock {",
+    "  public delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);",
+    "  [DllImport(\"user32.dll\")] static extern IntPtr SetWindowsHookEx(int idHook, HookProc lpfn, IntPtr hMod, uint dwThreadId);",
+    "  [DllImport(\"user32.dll\")] static extern bool UnhookWindowsHookEx(IntPtr hhk);",
+    "  [DllImport(\"user32.dll\")] static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);",
+    "  [DllImport(\"kernel32.dll\")] static extern IntPtr GetModuleHandle(string name);",
+    "  [DllImport(\"user32.dll\")] static extern short GetAsyncKeyState(int vKey);",
+    "  [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);",
+    "  static IntPtr hook = IntPtr.Zero;",
+    "  static HookProc proc = HookCallback;",
+    "  const int WH_KEYBOARD_LL = 13;",
+    "  public static void Install(){ if(hook==IntPtr.Zero){ hook = SetWindowsHookEx(WH_KEYBOARD_LL, proc, GetModuleHandle(null), 0); } }",
+    "  public static void Uninstall(){ if(hook!=IntPtr.Zero){ UnhookWindowsHookEx(hook); hook=IntPtr.Zero; } }",
+    "  static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam){",
+    "    if(nCode>=0){",
+    "      int vk = Marshal.ReadInt32(lParam);",
+    "      bool alt=(GetAsyncKeyState(0x12)&0x8000)!=0; bool ctrl=(GetAsyncKeyState(0x11)&0x8000)!=0;",
+    "      if(vk==0x5B||vk==0x5C) return (IntPtr)1;",          // LWIN / RWIN (kills Win+Ctrl+Arrow, Win+D/Tab/M/R)
+    "      if(alt && (vk==0x09||vk==0x1B)) return (IntPtr)1;", // Alt+Tab, Alt+Esc
+    "      if(ctrl && vk==0x1B) return (IntPtr)1;",            // Ctrl+Esc (Start), Ctrl+Shift+Esc (Task Manager)
+    "    }",
+    "    return CallNextHookEx(hook, nCode, wParam, lParam);",
+    "  }",
+    "}",
+  ].join("\n");
+  const win =
     "Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase; " +
     "$w=New-Object System.Windows.Window; $w.WindowStyle='None'; $w.WindowState='Maximized'; " +
-    "$w.Topmost=$true; $w.ResizeMode='NoResize'; " +
+    "$w.Topmost=$true; $w.ResizeMode='NoResize'; $w.ShowInTaskbar=$false; " +
     "$w.Background=(New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(0,0,0))); " +
     "$t=New-Object System.Windows.Controls.TextBlock; $t.Text='" + safe + "'; " +
     "$t.Foreground=(New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(148,214,10))); " +
     "$t.FontSize=44; $t.FontWeight='Bold'; $t.TextWrapping='Wrap'; $t.TextAlignment='Center'; " +
-    "$t.HorizontalAlignment='Center'; $t.VerticalAlignment='Center'; $t.Margin='40'; " +
-    "$w.Content=$t; $w.Add_Loaded({ $w.Activate() }); [void]$w.ShowDialog();";
+    "$t.HorizontalAlignment='Center'; $t.VerticalAlignment='Center'; $t.Margin='40'; $w.Content=$t; " +
+    // snap back if anything minimizes/restores it; reclaim focus if Alt+Tabbed away
+    "$w.Add_StateChanged({ if($w.WindowState -ne 'Maximized'){ $w.WindowState='Maximized' } }); " +
+    "$w.Add_Deactivated({ $w.Topmost=$true; [void]$w.Activate() }); " +
+    "$w.Add_Loaded({ [IDTLock]::Install(); [void]$w.Activate(); " +
+    "  $hh=(New-Object System.Windows.Interop.WindowInteropHelper $w).Handle; " +
+    "  $tm=New-Object System.Windows.Threading.DispatcherTimer; $tm.Interval=[TimeSpan]::FromMilliseconds(250); " +
+    "  $tm.Add_Tick({ [void][IDTLock]::SetForegroundWindow($hh); $w.Topmost=$true }); $tm.Start(); " +
+    "  $fs=New-Object System.Windows.Threading.DispatcherTimer; $fs.Interval=[TimeSpan]::FromMinutes(30); " +
+    "  $fs.Add_Tick({ $fs.Stop(); [IDTLock]::Uninstall(); $w.Close() }); $fs.Start() }); " +
+    "$w.Add_Closed({ [IDTLock]::Uninstall() }); " +
+    "[void]$w.ShowDialog();";
+  const ps = "$src = @'\n" + csharp + "\n'@\nAdd-Type -TypeDefinition $src -ErrorAction SilentlyContinue\n" + win;
   pauseChild = spawn("powershell", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps], {
     windowsHide: true,
     stdio: "ignore",
