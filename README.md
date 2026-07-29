@@ -381,6 +381,14 @@ after login) hits `/download/id-tech-watch.zip`. The zip contains `node.exe`,
 `watch.js`, `agent.js`, a `watch-config.json` template, and
 **Start / Stop iD Tech Watch.cmd**.
 
+> ⚠️ **`dist/` is git-ignored — `git pull` does NOT update the zip.** After
+> pulling new code on the hub machine, re-run `build-client.ps1`, or the Download
+> button keeps serving the *old* agent and every laptop you install it on will
+> immediately show as **outdated** in the Computers table. The admin panel warns
+> when the packaged build no longer matches the hub's, and shows both versions.
+> (Once laptops run a build from 2026-07-28 or later you can skip the zip
+> entirely and use **Update** / **Update all** to push new code remotely.)
+
 To deploy: unzip onto the laptop (or a USB) and double-click **Start iD Tech
 Watch.cmd**. It (transparently) sets up a self-healing pair of processes:
 - ensures `C:\Users\Student\projects\iD-Tech\` exists (creates it if missing);
