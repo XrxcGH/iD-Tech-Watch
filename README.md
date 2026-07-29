@@ -49,6 +49,14 @@ open its control panel (block games, close apps, message, refresh). Works with b
 mouse and touch, so it's usable on a phone or tablet while you walk the room. Use
 **Reset layout** to auto-arrange again.
 
+**House lab layout (building canvas)** — drill into a building and switch **▦
+Classes** to **🪑 Lab layout** to see every classroom in that house on one canvas,
+under a shared "front of classes ↑" header. Each room is a mini seating chart.
+Unlock (🔓) and drag a room by its **title bar** to arrange the classrooms the way
+the house is physically laid out — positions are saved per building and shared with
+anyone else viewing it. Tap a room's title to drill into that class; tap a computer
+to control it. **Reset layout** re-arranges the rooms into rows.
+
 **Block apps** — one click blocks a game everywhere it's selected; the agent kills
 it now and keeps killing it for a chosen duration (5 min … until you lift it).
 Built-in presets:

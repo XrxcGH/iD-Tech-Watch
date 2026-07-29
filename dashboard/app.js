@@ -168,7 +168,7 @@
   // ------------------------------------------------------------------ state
   const D = { org: [], devices: {}, layouts: {}, schedules: [], instructorCodeRequired: false };
   const nav = { view: "login", locationId: null, buildingId: null, classId: null };
-  const ui = { blockDurationSec: 60, loginRole: "instructor", connected: false, monitorMode: "grid", dragging: null, seatLocked: true, unlocked: {}, expandedProcs: new Set(), classSort: "room", scroll: {}, lastScrollAt: 0, theme: localStorage.getItem("idt_theme") || "dark" };
+  const ui = { blockDurationSec: 60, loginRole: "instructor", connected: false, monitorMode: "grid", buildingMode: "list", dragging: null, seatLocked: true, unlocked: {}, expandedProcs: new Set(), classSort: "room", scroll: {}, lastScrollAt: 0, theme: localStorage.getItem("idt_theme") || "dark" };
 
   function applyTheme() {
     document.documentElement.dataset.theme = ui.theme;
@@ -1072,10 +1072,20 @@
       const bDevs = devicesInBuilding(b.id);
       const bRunAll = (action, params) => command({ scope: "building", buildingId: b.id }, action, params);
       const openApps = [...new Set(bDevs.flatMap((d) => d.processes || []))].sort((a, x) => a.toLowerCase().localeCompare(x.toLowerCase()));
+      const bSeg = (mode, label) => el("button", { class: "seg-btn" + (ui.buildingMode === mode ? " active" : ""), onclick: () => { ui.buildingMode = mode; render(); } }, label);
+      const lockBtn = ui.buildingMode === "lab"
+        ? el("button", { class: "btn sm lock-btn" + (ui.seatLocked ? " locked" : ""), title: ui.seatLocked ? "Locked — click to unlock and rearrange rooms" : "Unlocked — drag to arrange. Click to lock.", onclick: () => { ui.seatLocked = !ui.seatLocked; render(); } }, ui.seatLocked ? "🔒 Locked" : "🔓 Unlocked")
+        : null;
       buildingControls = el(
         "div",
         { class: "building-controls" },
-        el("div", { class: "class-header" }, el("h2", {}, "🏢 " + b.name), el("div", { class: "class-meta" }, el("span", { class: "pill muted" }, `${onlineCount(bDevs)}/${bDevs.length} online in building`))),
+        el(
+          "div",
+          { class: "class-header" },
+          el("h2", {}, "🏢 " + b.name),
+          el("div", { class: "class-meta" }, el("span", { class: "pill muted" }, `${onlineCount(bDevs)}/${bDevs.length} online in building`)),
+          el("div", { class: "seg" }, bSeg("list", "▦ Classes"), bSeg("lab", "🪑 Lab layout"), lockBtn)
+        ),
         controlToolbar("Whole building:", bRunAll, `every screen in ${b.name}`),
         alwaysBlockBar(
           "Always block for this building:",
@@ -1086,7 +1096,8 @@
         )
       );
     }
-    return el("div", { class: "building-view" }, buildingControls, section("Select a class", grid, actions));
+    const body = ui.buildingMode === "lab" && f ? buildingLabView(f.b) : section("Select a class", grid, actions);
+    return el("div", { class: "building-view" }, buildingControls, body);
   }
 
   function tile(title, icon, lines, onclick) {
@@ -1145,6 +1156,142 @@
       chips,
       appComboBox(openApps, "Add app (type or pick an open app)…", (v) => addRule("app", v)),
       el("div", { class: "combo site-add" }, siteInput, el("button", { class: "btn sm", onclick: addSite }, "Add site"))
+    );
+  }
+
+  // ---- building "lab layout": every classroom placed on one house canvas ----
+  // A shared "front of classes" up top; each class is a draggable mini seating
+  // chart laid out from that class's saved positions. Drag a room by its title
+  // bar to arrange the house (positions persist per building, just like seats);
+  // tap a room's title to drill into it; tap a computer to control it.
+  const LAB_PER_ROW = 5; // default rooms across before wrapping to a new row
+  const ROOM_W = 0.185; // each room's width as a fraction of the canvas
+  const LAB_SNAP_X = 40; // fine snap grid for a room's top-left corner
+  const LAB_SNAP_Y = 24;
+  function roomLayoutKey(buildingId) {
+    return "rooms:" + buildingId;
+  }
+  function getRoomPos(buildingId, roomId, i) {
+    const saved = (D.layouts[roomLayoutKey(buildingId)] || {})[roomId];
+    if (saved && typeof saved.x === "number") return saved;
+    const col = i % LAB_PER_ROW;
+    const row = Math.floor(i / LAB_PER_ROW);
+    return { x: Math.min(1 - ROOM_W, 0.01 + col * (ROOM_W + 0.015)), y: 0.05 + row * 0.5 };
+  }
+  function snapRoom(x, y) {
+    const cx = Math.round(x * LAB_SNAP_X) / LAB_SNAP_X;
+    const cy = Math.round(y * LAB_SNAP_Y) / LAB_SNAP_Y;
+    return { x: Math.max(0, Math.min(1 - ROOM_W, cx)), y: Math.max(0, Math.min(0.98, cy)) };
+  }
+  function setRoomPosition(buildingId, roomId, x, y) {
+    (D.layouts[roomLayoutKey(buildingId)] ||= {})[roomId] = { x, y }; // optimistic
+    send({ type: "layout", op: "setPosition", layoutKey: roomLayoutKey(buildingId), deviceId: roomId, x, y });
+  }
+
+  // A single computer inside a lab-layout room: shows status only (names hide at
+  // this scale). Tap to open its control panel. Not draggable here — seat
+  // arrangement is done inside the class's own seating view.
+  function labSeat(d, pos) {
+    const blockedCount = (d.blocked || []).length + (d.blockedSites || []).length;
+    const node = el(
+      "div",
+      { class: "seat" + (d.online ? "" : " offline"), title: nameOf(d), onclick: () => openDevicePanel(D.devices[d.device_id] || d) },
+      el("span", { class: "seat-dot " + (d.online ? "on" : "off") }),
+      el("div", { class: "seat-screen" }, "💻"),
+      blockedCount ? el("span", { class: "seat-badge" }, "⛔ " + blockedCount) : null
+    );
+    node.style.left = pos.x * 100 + "%";
+    node.style.top = pos.y * 100 + "%";
+    node.style.width = (100 / SNAP_COLS) * 0.9 + "%";
+    return node;
+  }
+
+  // Make a room card draggable by its title bar within the house canvas.
+  // Grabs relative to where you clicked so the room doesn't jump; snaps to a
+  // fine grid; a click without movement runs onTap (drill into the class).
+  function attachRoomDrag(room, handle, buildingId, roomId, onTap) {
+    let start = null;
+    handle.addEventListener("pointerdown", (e) => {
+      if (e.button != null && e.button !== 0) return;
+      e.preventDefault();
+      try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+      const area = room.parentElement.getBoundingClientRect();
+      const rrect = room.getBoundingClientRect();
+      start = {
+        px: e.clientX, py: e.clientY, moved: false, x: 0, y: 0, area,
+        offX: (e.clientX - rrect.left) / area.width,
+        offY: (e.clientY - rrect.top) / area.height,
+      };
+      if (!ui.seatLocked) room.classList.add("dragging");
+    });
+    handle.addEventListener("pointermove", (e) => {
+      if (!start || ui.seatLocked) return;
+      const rawX = (e.clientX - start.area.left) / start.area.width - start.offX;
+      const rawY = (e.clientY - start.area.top) / start.area.height - start.offY;
+      const s = snapRoom(rawX, rawY);
+      if (Math.hypot(e.clientX - start.px, e.clientY - start.py) > 6) start.moved = true;
+      start.x = s.x;
+      start.y = s.y;
+      room.style.left = s.x * 100 + "%";
+      room.style.top = s.y * 100 + "%";
+    });
+    const end = () => {
+      if (!start) return;
+      room.classList.remove("dragging");
+      const { moved, x, y } = start;
+      start = null;
+      if (moved) setRoomPosition(buildingId, roomId, x, y);
+      else if (onTap) onTap();
+    };
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", end);
+  }
+
+  function labRoom(name, devs, roomId, pos, onTap, buildingId) {
+    const sorted = devs.slice().sort((a, x) => nameOf(a).toLowerCase().localeCompare(nameOf(x).toLowerCase()));
+    const canvas = el("div", { class: "room lab-canvas" });
+    canvas.append(el("div", { class: "room-front" }, "front"));
+    sorted.forEach((d, i) => canvas.append(labSeat(d, getPos(roomId, d, i, sorted.length))));
+    if (!sorted.length) canvas.append(el("div", { class: "room-empty" }, "No computers"));
+    const head = el(
+      "div",
+      { class: "lab-room-head" },
+      el("div", { class: "lab-room-name", title: "Open " + name }, name),
+      el("span", { class: "pill muted sm" }, `${onlineCount(sorted)}/${sorted.length}`)
+    );
+    const room = el("div", { class: "lab-room" + (ui.seatLocked ? "" : " movable") }, head, canvas);
+    room.style.left = pos.x * 100 + "%";
+    room.style.top = pos.y * 100 + "%";
+    attachRoomDrag(room, head, buildingId, roomId, onTap);
+    return room;
+  }
+  function buildingLabView(b) {
+    const classes = sortClasses(b.classes);
+    const un = unassignedInBuilding(b.id);
+    if (!classes.length && !un.length) return emptyNote("No classes in this building yet.");
+    const area = el("div", { class: "lab-canvas-area" });
+    let i = 0;
+    for (const c of classes) {
+      area.append(labRoom(c.name, devicesInClass(c.id), c.id, getRoomPos(b.id, c.id, i), () => setDrill(nav.locationId, b.id, c.id), b.id));
+      i++;
+    }
+    if (un.length) {
+      const rid = "un:" + b.id;
+      area.append(labRoom("Unassigned", un, rid, getRoomPos(b.id, rid, i), () => setDrill(nav.locationId, b.id, UNASSIGNED), b.id));
+    }
+    const bar = el(
+      "div",
+      { class: "canvas-bar" },
+      el("span", { class: "muted small" }, ui.seatLocked ? "Rooms locked. Tap a room's title to open it; tap a computer to control it." : "Drag each room by its title bar to arrange the house. Tap a computer to control it."),
+      el("span", { class: "spacer" }),
+      el("button", { class: "btn ghost sm", disabled: ui.seatLocked, title: ui.seatLocked ? "Unlock first" : "", onclick: () => { if (!ui.seatLocked) resetLayout(roomLayoutKey(b.id)); } }, "Reset layout")
+    );
+    return el(
+      "div",
+      { class: "lab-view" + (ui.seatLocked ? " locked" : "") },
+      el("div", { class: "lab-front-label" }, "front of classes ↑"),
+      bar,
+      area
     );
   }
 
