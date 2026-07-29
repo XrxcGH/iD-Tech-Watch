@@ -40,17 +40,67 @@ const CONFIG_PATH = process.env.IDT_CONFIG_PATH || path.join(DATA_DIR, "config.j
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
-// The build stamp of the agent source this hub would push on "Update" — read
-// once at startup so the dashboard can flag laptops running an older version.
-const CURRENT_BUILD = (() => {
+// The build stamp of the agent source this hub would push on "Update", so the
+// dashboard can flag laptops running an older version.
+//
+// Re-read from disk (cached on mtime) rather than captured once at startup: a
+// `git pull` on the hub machine updates agent.js underneath a running hub, and
+// a stale stamp here makes every correctly-updated laptop show as "outdated".
+const AGENT_SRC = path.join(__dirname, "..", "agent", "agent.js");
+const WATCH_SRC = path.join(__dirname, "..", "agent", "watch.js");
+let buildCache = { mtime: 0, build: "" };
+function agentBuild() {
   try {
-    const src = fs.readFileSync(path.join(__dirname, "..", "agent", "agent.js"), "utf8");
-    const m = /const BUILD = "([^"]*)"/.exec(src);
-    return m ? m[1] : "";
+    const mtime = fs.statSync(AGENT_SRC).mtimeMs;
+    if (mtime !== buildCache.mtime) {
+      const m = /const BUILD = "([^"]*)"/.exec(fs.readFileSync(AGENT_SRC, "utf8"));
+      buildCache = { mtime, build: m ? m[1] : "" };
+    }
+  } catch (_) {}
+  return buildCache.build;
+}
+
+// Does the downloadable install package actually contain the current agent?
+// `dist/` is git-ignored, so a `git pull` on the hub updates the source but
+// leaves the old zip in place — the Download button would then hand out an
+// agent that registers as outdated the moment it is installed.
+//
+// Compared by BUILD stamp (not mtime: git checkouts rewrite files without
+// changing content, which would false-alarm). build-client.ps1 stages
+// dist/iD-Tech-Watch/ and zips it, so the staged agent.js mirrors the zip.
+let packagedCache = { mtime: 0, build: "" };
+function clientZipInfo() {
+  const zipPath = path.join(DIST_DIR, "iD-Tech-Watch.zip");
+  if (!fs.existsSync(zipPath)) return { missing: true, stale: false, packagedBuild: "" };
+  let packagedBuild = "";
+  try {
+    // cached on mtime: this runs on every state broadcast (i.e. every agent
+    // heartbeat), and the staged agent.js is ~48 KB
+    const stagedPath = path.join(DIST_DIR, "iD-Tech-Watch", "agent.js");
+    const mtime = fs.statSync(stagedPath).mtimeMs;
+    if (mtime !== packagedCache.mtime) {
+      const m = /const BUILD = "([^"]*)"/.exec(fs.readFileSync(stagedPath, "utf8"));
+      packagedCache = { mtime, build: m ? m[1] : "" };
+    }
+    packagedBuild = packagedCache.build;
   } catch (_) {
-    return "";
+    // no staged copy to inspect — don't guess, and don't false-alarm
+    return { missing: false, stale: false, packagedBuild: "", unknown: true };
   }
-})();
+  const hub = agentBuild();
+  return {
+    missing: false,
+    packagedBuild,
+    stale: !!(hub && packagedBuild && packagedBuild !== hub),
+    built: (() => {
+      try {
+        return new Date(fs.statSync(zipPath).mtimeMs).toISOString();
+      } catch (_) {
+        return "";
+      }
+    })(),
+  };
+}
 
 // ==========================================================================
 // Persistent config (org tree + assignments + auth)
@@ -573,7 +623,8 @@ function stateMessage() {
     devices: devicesView(),
     layouts: config.layouts,
     schedules: config.schedules,
-    currentBuild: CURRENT_BUILD, // agent version the hub would push on "Update"
+    currentBuild: agentBuild(), // agent version the hub would push on "Update"
+    clientZip: clientZipInfo(), // freshness of the downloadable install package
     instructorCodeRequired: false, // instructor sign-in is open; buildings use codes
   };
 }
@@ -958,8 +1009,8 @@ function handleDashboard(ws) {
       }
       let agentSrc = "", watchSrc = "";
       try {
-        agentSrc = fs.readFileSync(path.join(__dirname, "..", "agent", "agent.js"), "utf8");
-        watchSrc = fs.readFileSync(path.join(__dirname, "..", "agent", "watch.js"), "utf8");
+        agentSrc = fs.readFileSync(AGENT_SRC, "utf8");
+        watchSrc = fs.readFileSync(WATCH_SRC, "utf8");
       } catch (e) {
         ws.sendJSON({ type: "error", detail: "hub could not read agent source: " + e.message });
         return;

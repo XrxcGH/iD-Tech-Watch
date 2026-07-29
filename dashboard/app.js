@@ -303,6 +303,7 @@
         D.layouts = msg.layouts || {};
         D.schedules = msg.schedules || [];
         D.currentBuild = msg.currentBuild || "";
+        D.clientZip = msg.clientZip || null;
         D.instructorCodeRequired = msg.instructorCodeRequired;
         if (!deepLinkDone) {
           deepLinkDone = true;
@@ -2373,7 +2374,32 @@
       manualNeeded ? el("span", { class: "muted small manual-note", title: "These run an older agent from before remote updates — install once manually, then they update from here." }, `⚠ ${manualNeeded} need a one-time manual install`) : null,
       auth && auth.role === "admin" ? updateAllBtn : null
     );
-    return section("Computers", table, actions);
+
+    // The hub's expected version, plus a warning when the downloadable install
+    // package is older than the software the hub is running. `dist/` is not in
+    // git, so pulling on the hub updates the source but leaves the old zip in
+    // place — installing that zip would register as outdated straight away.
+    const zip = D.clientZip;
+    const zipWarn =
+      zip && (zip.stale || zip.missing)
+        ? el(
+            "div",
+            { class: "zip-warn" },
+            zip.missing
+              ? el("div", {}, "⚠ No install package has been built on this hub yet — the Download button will not work.")
+              : el(
+                  "div",
+                  {},
+                  el("b", {}, "⚠ The Download package is out of date."),
+                  el("div", {}, `It installs build “${zip.packagedBuild || "unknown"}”, but this hub expects “${D.currentBuild}”. Laptops installed from it will still show as outdated.`)
+                ),
+            el("div", { class: "zip-fix" }, "Fix: on the hub machine run  powershell -File scripts/build-client.ps1  (dist/ is not in git, so git pull does not update the package), then re-download.")
+          )
+        : null;
+    const hubVer = D.currentBuild
+      ? el("div", { class: "muted small hub-ver" }, `Hub expects agent build: ${D.currentBuild}`)
+      : null;
+    return section("Computers", el("div", {}, zipWarn, hubVer, table), actions);
   }
 
   function adminSettings() {

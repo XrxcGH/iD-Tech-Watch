@@ -1332,6 +1332,26 @@ details.apps .procs {
   font-size: 8px;
   padding: 0 2px;
 }
+/* stale/missing install-package warning above the computers table */
+.zip-warn {
+  margin-bottom: 10px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid #d98c00;
+  background: rgba(217, 140, 0, 0.12);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.zip-warn .zip-fix {
+  margin-top: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  opacity: 0.85;
+}
+.hub-ver {
+  margin-bottom: 8px;
+}
 /* admin computers: filters + version badge */
 .dev-filters {
   display: flex;
