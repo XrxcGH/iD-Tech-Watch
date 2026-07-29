@@ -875,6 +875,15 @@ details.apps .procs {
   font-size: 15px;
   font-weight: 600;
 }
+.target-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.target-filters:empty {
+  display: none;
+}
 .target-list {
   display: flex;
   flex-wrap: wrap;
@@ -1352,6 +1361,15 @@ details.apps .procs {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+.sched-form.editing {
+  border-color: var(--id-green);
+  box-shadow: var(--glow);
+}
+.sched-editing-note {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--brand-ink);
 }
 .sched-row {
   display: flex;
