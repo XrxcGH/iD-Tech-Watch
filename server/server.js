@@ -710,6 +710,11 @@ function applyOrgOp(op) {
         // one or more targets: class / building / location / all
         targets: Array.isArray(op.targets) && op.targets.length ? op.targets : [op.target || { scope: "all" }],
         commands: Array.isArray(op.commands) ? op.commands : [],
+        // editing metadata: which event type + its inputs (so an event can be
+        // re-opened and edited without reverse-engineering the commands).
+        typeId: op.typeId || "",
+        msgText: op.msgText || "",
+        pauseMin: op.pauseMin || 0,
         enabled: op.enabled !== false,
         lastFired: null,
       });
@@ -717,7 +722,7 @@ function applyOrgOp(op) {
     case "updateSchedule": {
       const s = config.schedules.find((x) => x.id === op.id);
       if (s)
-        for (const k of ["name", "time", "days", "targets", "commands", "enabled"])
+        for (const k of ["name", "time", "days", "targets", "commands", "enabled", "typeId", "msgText", "pauseMin"])
           if (k in op) s[k] = op[k];
       break;
     }

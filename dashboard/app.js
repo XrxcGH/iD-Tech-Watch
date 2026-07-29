@@ -1690,51 +1690,98 @@
   }
   // Pick a scope from a dropdown, then tick the specific items — short + readable,
   // and still lets one event apply to several buildings/campuses at once.
-  function buildTargetPicker() {
+  function buildTargetPicker(initialTargets) {
+    const keyOf = (t) => t.scope + ":" + (t.locationId || t.buildingId || t.classId || "");
+    const initial = Array.isArray(initialTargets) && initialTargets.length ? initialTargets : [{ scope: "all" }];
+    const initScope = initial.every((t) => t.scope === initial[0].scope) ? initial[0].scope : "all";
+    const selected = new Set(initial.filter((t) => t.scope !== "all").map(keyOf));
+
     const wrap = el("div", { class: "target-picker" });
     const scopeSel = el(
       "select",
       { class: "target-scope" },
-      el("option", { value: "all" }, "Everyone — all campuses"),
-      el("option", { value: "location" }, "Whole campus…"),
-      el("option", { value: "building" }, "Specific buildings…"),
-      el("option", { value: "class" }, "Specific classes…")
+      ...[["all", "Everyone — all campuses"], ["location", "Whole campus…"], ["building", "Specific buildings…"], ["class", "Specific classes…"]].map(([v, t]) => el("option", { value: v, selected: v === initScope }, t))
     );
+    // filters (narrow the checkbox list): campus for buildings; campus + building
+    // for classes — so big orgs aren't a wall of every class.
+    const filterBar = el("div", { class: "target-filters" });
+    const locFilter = el("select", { class: "filter-sel" }, el("option", { value: "" }, "All campuses"), ...D.org.map((l) => el("option", { value: l.id }, "📍 " + l.name)));
+    const bldFilter = el("select", { class: "filter-sel" });
+    function refreshBldFilter() {
+      bldFilter.innerHTML = "";
+      bldFilter.append(el("option", { value: "" }, "All buildings"));
+      for (const l of D.org) { if (locFilter.value && l.id !== locFilter.value) continue; for (const b of l.buildings) bldFilter.append(el("option", { value: b.id }, "🏢 " + b.name)); }
+    }
+
     const list = el("div", { class: "target-list" });
-    let boxes = [];
     function rebuild() {
-      list.innerHTML = "";
-      boxes = [];
       const scope = scopeSel.value;
-      if (scope === "all") {
-        list.append(el("div", { class: "muted small" }, "Runs on every computer at every campus."));
-        return;
-      }
+      filterBar.innerHTML = "";
+      if (scope === "building") filterBar.append(el("span", { class: "filter-label" }, "Campus:"), locFilter);
+      else if (scope === "class") { refreshBldFilter(); filterBar.append(el("span", { class: "filter-label" }, "Campus:"), locFilter, el("span", { class: "filter-label" }, "Building:"), bldFilter); }
+      list.innerHTML = "";
+      if (scope === "all") { list.append(el("div", { class: "muted small" }, "Runs on every computer at every campus.")); return; }
       const add = (label, target) => {
-        const cb = el("input", { type: "checkbox" });
-        boxes.push({ cb, target });
+        const k = keyOf(target);
+        const cb = el("input", { type: "checkbox", checked: selected.has(k), onchange: () => { if (cb.checked) selected.add(k); else selected.delete(k); } });
         list.append(el("label", { class: "target-chip" }, cb, el("span", {}, label)));
       };
       if (scope === "location") for (const loc of D.org) add(`📍 ${loc.name}`, { scope: "location", locationId: loc.id });
-      else if (scope === "building") for (const loc of D.org) for (const b of loc.buildings) add(`🏢 ${b.name}`, { scope: "building", buildingId: b.id });
-      else for (const loc of D.org) for (const b of loc.buildings) for (const c of b.classes) add(`💻 ${b.name} · ${c.name}`, { scope: "class", classId: c.id });
-      if (!boxes.length) list.append(el("div", { class: "muted small" }, "Nothing at this level yet."));
+      else if (scope === "building") for (const loc of D.org) { if (locFilter.value && loc.id !== locFilter.value) continue; for (const b of loc.buildings) add(`🏢 ${b.name}`, { scope: "building", buildingId: b.id }); }
+      else for (const loc of D.org) { if (locFilter.value && loc.id !== locFilter.value) continue; for (const b of loc.buildings) { if (bldFilter.value && b.id !== bldFilter.value) continue; for (const c of b.classes) add(`💻 ${b.name} · ${c.name}`, { scope: "class", classId: c.id }); } }
+      if (!list.children.length) list.append(el("div", { class: "muted small" }, "Nothing at this level yet."));
     }
     scopeSel.addEventListener("change", rebuild);
+    locFilter.addEventListener("change", rebuild);
+    bldFilter.addEventListener("change", rebuild);
     rebuild();
-    wrap.append(scopeSel, list);
+    wrap.append(scopeSel, filterBar, list);
+    // Reconstruct selected targets from the org tree so selections survive filtering.
+    function collect() {
+      const scope = scopeSel.value;
+      if (scope === "all") return [{ scope: "all" }];
+      const out = [];
+      for (const l of D.org) {
+        if (scope === "location" && selected.has("location:" + l.id)) out.push({ scope: "location", locationId: l.id });
+        for (const b of l.buildings) {
+          if (scope === "building" && selected.has("building:" + b.id)) out.push({ scope: "building", buildingId: b.id });
+          if (scope === "class") for (const c of b.classes) if (selected.has("class:" + c.id)) out.push({ scope: "class", classId: c.id });
+        }
+      }
+      return out;
+    }
     return {
       node: wrap,
-      getTargets: () => (scopeSel.value === "all" ? [{ scope: "all" }] : boxes.filter((x) => x.cb.checked).map((x) => x.target)),
-      reset: () => { scopeSel.value = "all"; rebuild(); },
+      getTargets: collect,
+      reset: () => { scopeSel.value = "all"; locFilter.value = ""; bldFilter.value = ""; selected.clear(); rebuild(); },
     };
   }
   function fieldInline(label, node) {
     return el("label", { class: "field-inline" }, el("span", {}, label), node);
   }
 
+  // Recover the event type + inputs from a stored schedule (uses the saved
+  // metadata when present; otherwise infers from the commands for old events).
+  function scheduleTypeOf(s) {
+    if (s.typeId) return { typeId: s.typeId, msgText: s.msgText || "", pauseMin: s.pauseMin || 0 };
+    const cmds = s.commands || [];
+    const actions = cmds.map((c) => c.action);
+    let typeId = "pause", msgText = "", pauseMin = 0;
+    if (actions.includes("message")) { typeId = "message"; const m = cmds.find((c) => c.action === "message"); msgText = (m && m.params && m.params.text) || ""; }
+    else if (actions.includes("resume")) typeId = "resume";
+    else if (actions.includes("pause")) { typeId = "pause"; const p = cmds.find((c) => c.action === "pause"); pauseMin = p && p.params && p.params.duration_sec ? Math.round(p.params.duration_sec / 60) : 0; }
+    else if (actions.includes("unblock_all")) typeId = "unblock";
+    else if (actions.includes("minimize_all")) typeId = "minimize_all";
+    else if (actions.includes("close_tab")) typeId = "close_tab";
+    else if (actions.includes("close_browsers")) typeId = "close_browsers";
+    else if (actions.includes("block_app")) { const ba = cmds.find((c) => c.action === "block_app"); typeId = (ba && ba.params && (ba.params.patterns || []).length > 1) ? "block_all" : "block_roblox"; }
+    return { typeId, msgText, pauseMin };
+  }
+
   function adminSchedules() {
     const body = el("div", {});
+    const editing = ui.editingSchedule ? (D.schedules || []).find((s) => s.id === ui.editingSchedule) : null;
+    if (ui.editingSchedule && !editing) ui.editingSchedule = null; // event was deleted
 
     const table = el("table", { class: "sched-table" });
     table.append(
@@ -1760,20 +1807,26 @@
           el("td", {}, daysTxt),
           el("td", {}, targetsLabel(s)),
           el("td", {}, does),
-          el("td", {}, el("button", { class: "btn ghost sm danger", onclick: () => modalConfirm(`Delete event “${s.name}”?`, { title: "Delete event", danger: true, okText: "Delete" }).then((ok) => ok && org({ op: "deleteSchedule", id: s.id })) }, "Delete"))
+          el(
+            "td",
+            { class: "row-actions" },
+            el("button", { class: "btn ghost sm" + (ui.editingSchedule === s.id ? " primary" : ""), onclick: () => { ui.editingSchedule = ui.editingSchedule === s.id ? null : s.id; render(); } }, "Edit"),
+            el("button", { class: "btn ghost sm danger", onclick: () => modalConfirm(`Delete event “${s.name}”?`, { title: "Delete event", danger: true, okText: "Delete" }).then((ok) => ok && (ui.editingSchedule === s.id && (ui.editingSchedule = null), org({ op: "deleteSchedule", id: s.id }))) }, "Delete")
+          )
         )
       );
     }
     table.append(tb);
     body.append(table);
 
-    // add form
-    const nameI = el("input", { placeholder: "Event name (e.g. Lunch pause)" });
-    const timeI = el("input", { type: "time", value: "12:00" });
-    const dayState = [];
+    // add / edit form (pre-filled when editing an existing event)
+    const et0 = editing ? scheduleTypeOf(editing) : { typeId: EVENT_TYPES[0].id, msgText: "", pauseMin: 0 };
+    const nameI = el("input", { placeholder: "Event name (e.g. Lunch pause)", value: editing ? editing.name : "" });
+    const timeI = el("input", { type: "time", value: editing ? editing.time : "12:00" });
+    const dayState = editing && Array.isArray(editing.days) ? editing.days.slice() : [];
     const dayBtns = el("div", { class: "day-toggle" });
     DOW.forEach((d, idx) => {
-      const b = el("button", { class: "day-btn", type: "button", onclick: () => {
+      const b = el("button", { class: "day-btn" + (dayState.includes(idx) ? " active" : ""), type: "button", onclick: () => {
         b.classList.toggle("active");
         const i = dayState.indexOf(idx);
         if (i >= 0) dayState.splice(i, 1);
@@ -1781,12 +1834,12 @@
       } }, d[0]);
       dayBtns.append(b);
     });
-    const targetPicker = buildTargetPicker();
+    const targetPicker = buildTargetPicker(editing ? editing.targets : null);
     // Pause-duration field appears only for the Pause event; message field only
     // for the Message event — so the form stays uncluttered.
-    const pauseMinI = el("input", { type: "number", min: "0", step: "1", value: "0", placeholder: "0 = until Resume" });
+    const pauseMinI = el("input", { type: "number", min: "0", step: "1", value: String(et0.pauseMin || 0), placeholder: "0 = until Resume" });
     const pauseField = fieldInline("Pause for (min)", pauseMinI);
-    const msgI = el("input", { placeholder: "Message text" });
+    const msgI = el("input", { placeholder: "Message text", value: et0.msgText || "" });
     const msgField = fieldInline("Message", msgI);
     const typeSel = el("select", {
       onchange: () => {
@@ -1794,34 +1847,42 @@
         pauseField.style.display = et && et.usesPause ? "" : "none";
         msgField.style.display = et && et.usesMsg ? "" : "none";
       },
-    }, ...EVENT_TYPES.map((t) => el("option", { value: t.id }, t.label)));
-    const addBtn = el("button", { class: "btn primary sm", onclick: () => {
+    }, ...EVENT_TYPES.map((t) => el("option", { value: t.id, selected: t.id === et0.typeId }, t.label)));
+    const submit = () => {
       const targets = targetPicker.getTargets();
       if (!targets.length) return toast("Tick at least one class, building, or campus.");
       const et = EVENT_TYPES.find((t) => t.id === typeSel.value) || EVENT_TYPES[0];
       const opts = { text: msgI.value.trim(), pauseMin: Math.max(0, parseInt(pauseMinI.value, 10) || 0) };
-      org({ op: "addSchedule", name: nameI.value.trim() || "Event", time: timeI.value || "12:00", days: dayState.slice(), targets, commands: et.build(opts), enabled: true });
-      nameI.value = "";
-      msgI.value = "";
-      pauseMinI.value = "0";
-      dayState.length = 0;
-      [...dayBtns.children].forEach((c) => c.classList.remove("active"));
-      targetPicker.reset();
-      toast("Scheduled event added.");
-    } }, "Add event");
+      const payload = { name: nameI.value.trim() || "Event", time: timeI.value || "12:00", days: dayState.slice(), targets, commands: et.build(opts), typeId: et.id, msgText: opts.text, pauseMin: opts.pauseMin };
+      if (editing) {
+        org(Object.assign({ op: "updateSchedule", id: editing.id }, payload));
+        ui.editingSchedule = null;
+        toast("Scheduled event updated.");
+        render();
+      } else {
+        org(Object.assign({ op: "addSchedule", enabled: true }, payload));
+        nameI.value = ""; msgI.value = ""; pauseMinI.value = "0";
+        dayState.length = 0; [...dayBtns.children].forEach((c) => c.classList.remove("active"));
+        targetPicker.reset();
+        toast("Scheduled event added.");
+      }
+    };
+    const submitBtn = el("button", { class: "btn primary sm", onclick: submit }, editing ? "Save changes" : "Add event");
+    const cancelBtn = editing ? el("button", { class: "btn ghost sm", onclick: () => { ui.editingSchedule = null; render(); } }, "Cancel") : null;
 
     body.append(
       el(
         "div",
-        { class: "sched-form" },
+        { class: "sched-form" + (editing ? " editing" : "") },
+        editing ? el("div", { class: "sched-editing-note" }, `Editing “${editing.name}” — change any field and Save.`) : null,
         el("div", { class: "sched-row" }, fieldInline("Name", nameI), fieldInline("Time", timeI)),
         el("div", { class: "sched-row" }, fieldInline("Days (none = every day)", dayBtns)),
         el("div", { class: "sched-row" }, fieldInline("Event", typeSel), pauseField, msgField),
         el("div", { class: "sched-row" }, fieldInline("Applies to (tick any campuses / buildings / classes)", targetPicker.node)),
-        el("div", { class: "sched-row" }, addBtn)
+        el("div", { class: "sched-row" }, submitBtn, cancelBtn)
       )
     );
-    // set initial field visibility for the default (first) event type
+    // set initial field visibility for the selected event type
     (() => {
       const et = EVENT_TYPES.find((t) => t.id === typeSel.value);
       pauseField.style.display = et && et.usesPause ? "" : "none";
