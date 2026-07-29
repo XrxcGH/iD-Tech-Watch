@@ -345,6 +345,7 @@
     send({ type: "command", target, action, params: params || {} });
   const org = (op) => send(Object.assign({ type: "org" }, op));
   const classrule = (op) => send(Object.assign({ type: "classrule" }, op));
+  const buildingrule = (op) => send(Object.assign({ type: "buildingrule" }, op));
   const rename = (deviceId, name) => send({ type: "rename", deviceId, name });
   const removeDevice = (deviceId) => send({ type: "removeDevice", deviceId });
   const updateAgent = (target) => send({ type: "updateAgent", target });
@@ -674,7 +675,7 @@
   function monitorSig() {
     return JSON.stringify({
       view: [nav.view, nav.locationId, nav.buildingId, nav.classId, ui.monitorMode],
-      org: D.org.map((l) => [l.id, l.name, l.buildings.map((b) => [b.id, b.name, b.code ? 1 : 0, b.classes.map((c) => [c.id, c.name, c.instructor, c.room, (c.blockApps || []).join(",")])])]),
+      org: D.org.map((l) => [l.id, l.name, l.buildings.map((b) => [b.id, b.name, b.code ? 1 : 0, (b.blockApps || []).join(",") + "~" + (b.blockSites || []).join(","), b.classes.map((c) => [c.id, c.name, c.instructor, c.room, (c.blockApps || []).join(","), (c.blockSites || []).join(",")])])]),
       devs: deviceList().map((d) => [
         d.device_id, d.online ? 1 : 0, nameOf(d), d.os, d.locationId, d.buildingId, d.classId,
         (d.windows || []).join("|"),
@@ -1062,7 +1063,30 @@
       )
     );
     const actions = el("div", { class: "picker-actions" }, entries.length > 1 ? makeTileSearch(entries, "Search classes, instructor, room…") : null, classes.length > 1 ? sortSel : null);
-    return section("Select a class", grid, actions);
+
+    // Whole-building controls: pause/message/block every screen in the building
+    // at once, plus a building-wide persistent "always block" list.
+    let buildingControls = null;
+    if (f) {
+      const b = f.b;
+      const bDevs = devicesInBuilding(b.id);
+      const bRunAll = (action, params) => command({ scope: "building", buildingId: b.id }, action, params);
+      const openApps = [...new Set(bDevs.flatMap((d) => d.processes || []))].sort((a, x) => a.toLowerCase().localeCompare(x.toLowerCase()));
+      buildingControls = el(
+        "div",
+        { class: "building-controls" },
+        el("div", { class: "class-header" }, el("h2", {}, "🏢 " + b.name), el("div", { class: "class-meta" }, el("span", { class: "pill muted" }, `${onlineCount(bDevs)}/${bDevs.length} online in building`))),
+        controlToolbar("Whole building:", bRunAll, `every screen in ${b.name}`),
+        alwaysBlockBar(
+          "Always block for this building:",
+          b,
+          (kind, value) => buildingrule({ op: "add", buildingId: b.id, kind, value }),
+          (kind, value) => buildingrule({ op: "remove", buildingId: b.id, kind, value }),
+          openApps
+        )
+      );
+    }
+    return el("div", { class: "building-view" }, buildingControls, section("Select a class", grid, actions));
   }
 
   function tile(title, icon, lines, onclick) {
@@ -1072,6 +1096,55 @@
       el("div", { class: "tile-icon" }, icon),
       el("div", { class: "tile-title" }, title),
       el("div", { class: "tile-lines" }, ...lines.map((l) => el("div", { class: "tile-line" }, l)))
+    );
+  }
+
+  // Shared control toolbar — used for a whole class AND a whole building.
+  // `runAll(action, params)` dispatches to the right scope; `where` describes the
+  // target for the message composer.
+  function controlToolbar(labelText, runAll, where) {
+    return el(
+      "div",
+      { class: "toolbar" },
+      el("span", { class: "toolbar-label" }, labelText),
+      el("button", { class: "btn danger", onclick: () => blockPreset(runAll, robloxPreset()) }, "Block Roblox"),
+      blockSelect(runAll),
+      el("button", { class: "btn", onclick: () => runAll("unblock_all", {}) }, "Unblock all"),
+      el("button", { class: "btn", onclick: () => runAll("pause", { text: "Paused by your instructor — eyes up front." }) }, "⏸ Pause"),
+      el("button", { class: "btn", onclick: () => runAll("resume", {}) }, "▶ Resume"),
+      el("button", { class: "btn", onclick: () => runAll("close_tab", {}) }, "Close tab"),
+      el("button", { class: "btn", onclick: () => runAll("minimize_all", {}) }, "Minimize"),
+      el("button", { class: "btn", onclick: () => openSendKeys(runAll) }, "⌨ Keys…"),
+      el("button", { class: "btn", onclick: () => openMessageComposer(runAll, where) }, "✉ Message / Lock…")
+    );
+  }
+
+  // Persistent "always block" bar for a class or a building — apps AND websites.
+  // `ruleObj` has blockApps/blockSites; add/remove(kind, value) send the rule.
+  function alwaysBlockBar(label, ruleObj, addRule, removeRule, openApps) {
+    const apps = ruleObj.blockApps || [];
+    const sites = ruleObj.blockSites || [];
+    const chips = el("div", { class: "rule-chips" });
+    if (!apps.length && !sites.length) chips.append(el("span", { class: "muted small" }, "none yet"));
+    apps.forEach((p) =>
+      chips.append(el("span", { class: "chip rule" }, "⛔ " + p, el("button", { class: "chip-x", title: "Remove", onclick: () => removeRule("app", p) }, "✕")))
+    );
+    sites.forEach((s) =>
+      chips.append(el("span", { class: "chip rule site" }, "🌐 " + s, el("button", { class: "chip-x", title: "Remove", onclick: () => removeRule("site", s) }, "✕")))
+    );
+    const siteInput = el("input", { class: "combo-input", type: "text", placeholder: "Add website (e.g. poki.com)…", autocomplete: "off" });
+    const addSite = () => {
+      const v = siteInput.value.trim();
+      if (v) { addRule("site", v); siteInput.value = ""; }
+    };
+    siteInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addSite(); } });
+    return el(
+      "div",
+      { class: "rules-bar" },
+      el("span", { class: "toolbar-label" }, label),
+      chips,
+      appComboBox(openApps, "Add app (type or pick an open app)…", (v) => addRule("app", v)),
+      el("div", { class: "combo site-add" }, siteInput, el("button", { class: "btn sm", onclick: addSite }, "Add site"))
     );
   }
 
@@ -1102,19 +1175,7 @@
     const classTargets = () => (isUn ? devs.map((d) => ({ scope: "device", deviceId: d.device_id })) : [{ scope: "class", classId: nav.classId }]);
     const runAll = (action, params) => classTargets().forEach((t) => command(t, action, params));
 
-    const toolbar = el(
-      "div",
-      { class: "toolbar" },
-      el("span", { class: "toolbar-label" }, "Whole class:"),
-      el("button", { class: "btn danger", onclick: () => blockPreset(runAll, robloxPreset()) }, "Block Roblox"),
-      blockSelect(runAll),
-      el("button", { class: "btn", onclick: () => runAll("unblock_all", {}) }, "Unblock all"),
-      el("button", { class: "btn", onclick: () => runAll("pause", { text: "Paused by your instructor — eyes up front." }) }, "⏸ Pause"),
-      el("button", { class: "btn", onclick: () => runAll("resume", {}) }, "▶ Resume"),
-      el("button", { class: "btn", onclick: () => runAll("close_tab", {}) }, "Close tab"),
-      el("button", { class: "btn", onclick: () => runAll("minimize_all", {}) }, "Minimize"),
-      el("button", { class: "btn", onclick: () => openMessageComposer(runAll, "every screen in this class") }, "✉ Message / Lock…")
-    );
+    const toolbar = controlToolbar("Whole class:", runAll, "every screen in this class");
 
     const sorted = devs.slice().sort((a, b) => nameOf(a).toLowerCase().localeCompare(nameOf(b).toLowerCase()));
     const layoutKey = nav.classId === UNASSIGNED ? "un:" + nav.buildingId : nav.classId;
@@ -1144,23 +1205,17 @@
       body = grid;
     }
 
-    // Persistent "always block" apps for this class (real classes only).
+    // Persistent "always block" apps + websites for this class (real classes only).
     let rulesBar = null;
     if (!isUn && meta) {
       const cls = meta.c;
-      const apps = cls.blockApps || [];
       const openApps = [...new Set(devs.flatMap((d) => d.processes || []))].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
-      const chips = el("div", { class: "rule-chips" });
-      if (!apps.length) chips.append(el("span", { class: "muted small" }, "none yet"));
-      apps.forEach((p) =>
-        chips.append(el("span", { class: "chip rule" }, p, el("button", { class: "chip-x", title: "Remove", onclick: () => classrule({ op: "remove", classId: cls.id, pattern: p }) }, "✕")))
-      );
-      rulesBar = el(
-        "div",
-        { class: "rules-bar" },
-        el("span", { class: "toolbar-label" }, "Always block for this class:"),
-        chips,
-        appComboBox(openApps, "Add app (type or pick an open app)…", (v) => classrule({ op: "add", classId: cls.id, pattern: v }))
+      rulesBar = alwaysBlockBar(
+        "Always block for this class:",
+        cls,
+        (kind, value) => classrule({ op: "add", classId: cls.id, kind, value }),
+        (kind, value) => classrule({ op: "remove", classId: cls.id, kind, value }),
+        openApps
       );
     }
 

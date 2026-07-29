@@ -377,14 +377,38 @@ function registerAgent(ws, info) {
   wsDevice.set(ws, deviceId);
   saveConfig();
 
-  // Re-apply this class's persistent "always block" apps to the (re)connecting device.
+  // Re-apply persistent "always block" rules (apps + sites) to the (re)connecting
+  // device — building-wide first, then this class's.
+  reapplyPersistentToWs(ws, deviceId, buildingId);
+  return deviceId;
+}
+
+// Push an org object's persistent always-block rules (apps + sites) down one ws.
+function reapplyObjBlocks(ws, obj) {
+  if (!obj) return;
+  if (obj.blockApps && obj.blockApps.length) ws.sendJSON({ type: "command", action: "block_app", params: { patterns: obj.blockApps } });
+  if (obj.blockSites && obj.blockSites.length) ws.sendJSON({ type: "command", action: "block_site", params: { domains: obj.blockSites } });
+}
+// Re-apply the building's + the device's class's persistent rules to one device.
+// Building rules are applied first, then class — and this is called right after a
+// class/device "unblock" so building-wide (and class) always-block rules survive
+// an instructor's "Unblock all" (building policy is preferred over a class clear).
+function reapplyPersistentToWs(ws, deviceId, buildingId) {
+  const fb = findBuilding(buildingId);
+  reapplyObjBlocks(ws, fb && fb.building);
   const cid = deviceClassId(deviceId, buildingId);
   if (cid) {
     const fc = findClass(cid);
-    if (fc && fc.klass.blockApps && fc.klass.blockApps.length)
-      ws.sendJSON({ type: "command", action: "block_app", params: { patterns: fc.klass.blockApps } });
+    reapplyObjBlocks(ws, fc && fc.klass);
   }
-  return deviceId;
+}
+// Re-apply persistent rules to every agent matching a command target.
+function reapplyPersistentForTarget(target) {
+  for (const ws of targetsFor(target)) {
+    const deviceId = wsDevice.get(ws);
+    const rec = deviceId && devices.get(deviceId);
+    if (rec) reapplyPersistentToWs(ws, deviceId, rec.buildingId);
+  }
 }
 
 // Rename a computer to a friendly name (e.g. this week's student). Persisted by
@@ -398,21 +422,43 @@ function applyRename(deviceId, name) {
   saveConfig();
 }
 
-// Persistent per-class blocked apps (managed by instructors OR admins).
-function applyClassRule(op) {
-  const f = findClass(op.classId);
-  if (!f) return;
-  f.klass.blockApps = f.klass.blockApps || [];
-  const pat = String(op.pattern || "").toLowerCase().trim();
-  if (!pat) return;
+// Persistent "always block" rules — for a whole class OR a whole building, and
+// for apps OR websites. Adds/removes the rule from the org tree and immediately
+// (un)blocks it across the target; reconnecting devices get it re-applied above.
+function applyRule(op) {
+  const scope = op.buildingId ? "building" : "class"; // buildingrule vs classrule
+  let obj, target;
+  if (scope === "building") {
+    const f = findBuilding(op.buildingId);
+    if (!f) return;
+    obj = f.building;
+    target = { scope: "building", buildingId: op.buildingId };
+  } else {
+    const f = findClass(op.classId);
+    if (!f) return;
+    obj = f.klass;
+    target = { scope: "class", classId: op.classId };
+  }
+  const isSite = op.kind === "site";
+  const listKey = isSite ? "blockSites" : "blockApps";
+  obj[listKey] = obj[listKey] || [];
+  const raw = op.value != null ? op.value : op.pattern; // pattern = legacy app field
+  const v = isSite
+    ? String(raw || "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/^www\./, "")
+    : String(raw || "").toLowerCase().trim();
+  if (!v) return;
   if (op.op === "add") {
-    if (!f.klass.blockApps.includes(pat)) {
-      f.klass.blockApps.push(pat);
-      sendCommand({ scope: "class", classId: op.classId }, "block_app", { patterns: [pat] });
+    if (!obj[listKey].includes(v)) {
+      obj[listKey].push(v);
+      if (isSite) sendCommand(target, "block_site", { domains: [v] });
+      else sendCommand(target, "block_app", { patterns: [v] });
     }
   } else if (op.op === "remove") {
-    f.klass.blockApps = f.klass.blockApps.filter((x) => x !== pat);
-    sendCommand({ scope: "class", classId: op.classId }, "unblock_app", { pattern: pat });
+    obj[listKey] = obj[listKey].filter((x) => x !== v);
+    if (isSite) sendCommand(target, "unblock_site", { domain: v });
+    else sendCommand(target, "unblock_app", { pattern: v });
+    // removing a class rule must not lift a building-wide block of the same thing
+    if (scope === "class") reapplyPersistentForTarget(target);
   }
   saveConfig();
 }
@@ -480,12 +526,15 @@ function orgView() {
       id: b.id,
       name: b.name,
       code: b.code || "8676",
+      blockApps: b.blockApps || [],
+      blockSites: b.blockSites || [],
       classes: b.classes.map((c) => ({
         id: c.id,
         name: c.name,
         instructor: c.instructor || "",
         room: c.room || "",
         blockApps: c.blockApps || [],
+        blockSites: c.blockSites || [],
       })),
     })),
   }));
@@ -856,7 +905,13 @@ function handleDashboard(ws) {
         ws.sendJSON({ type: "ack", action: msg.action, sent: 1 });
         return;
       }
-      const sent = sendCommand(msg.target || {}, msg.action, msg.params);
+      const sent = sendCommand(target, msg.action, msg.params);
+      // "Unblock all" (and other unblocks) at class/device scope must NOT wipe out
+      // building-wide (or class) always-block policy — re-apply it right after so
+      // building rules stay in effect. (WS is FIFO: unblock is processed first.)
+      if ((msg.action === "unblock_all" || msg.action === "unblock_app" || msg.action === "unblock_site") && (target.scope === "class" || target.scope === "device")) {
+        reapplyPersistentForTarget(target);
+      }
       ws.sendJSON({ type: "ack", action: msg.action, sent });
     } else if (msg.type === "org") {
       if (ws.role !== "admin") {
@@ -869,8 +924,12 @@ function handleDashboard(ws) {
       // seating positions — any authenticated instructor/admin may adjust
       if (applyLayoutOp(msg)) broadcastState();
     } else if (msg.type === "classrule") {
-      // per-class persistent app blocks — instructors manage their own class
-      applyClassRule(msg);
+      // per-class persistent app/site blocks — instructors manage their own class
+      applyRule(msg);
+      broadcastState();
+    } else if (msg.type === "buildingrule") {
+      // building-wide persistent app/site blocks
+      applyRule(msg);
       broadcastState();
     } else if (msg.type === "rename") {
       // rename a computer to the student's name — any authenticated instructor
