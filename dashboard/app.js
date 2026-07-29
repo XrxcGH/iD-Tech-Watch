@@ -1924,16 +1924,59 @@
     );
     const m = openModal({ title: "One-time manual update needed", body, actions: [el("button", { class: "btn primary", onclick: () => m.close() }, "Got it")], width: "500px" });
   }
+  // A "select all that apply" chip-checkbox group. `selected` is an array that
+  // is mutated in place; `onChange` runs after any toggle. An empty selection
+  // means "all" (shown as an All chip). Reused for filters and pickers.
+  function checkboxGroup(items, selected, onChange, opts) {
+    opts = opts || {};
+    const wrap = el("div", { class: "chk-group" });
+    if (opts.allLabel) {
+      wrap.append(
+        el(
+          "label",
+          { class: "chk-chip all" + (!selected.length ? " on" : "") },
+          el("input", { type: "checkbox", checked: !selected.length, onchange: () => { selected.length = 0; onChange(); } }),
+          el("span", {}, opts.allLabel)
+        )
+      );
+    }
+    items.forEach((it) => {
+      const on = selected.includes(it.value);
+      wrap.append(
+        el(
+          "label",
+          { class: "chk-chip" + (on ? " on" : "") },
+          el("input", {
+            type: "checkbox",
+            checked: on,
+            onchange: () => {
+              const i = selected.indexOf(it.value);
+              if (i >= 0) selected.splice(i, 1);
+              else selected.push(it.value);
+              onChange();
+            },
+          }),
+          el("span", {}, it.label)
+        )
+      );
+    });
+    return wrap;
+  }
+
   function adminComputers() {
     const all = deviceList();
-    // ---- filters (by building/house + status) ----
-    const flt = (ui.adminDevFilter ||= { building: "", status: "" });
+    // ---- filters: multiple houses/buildings (checkboxes) + a status ----
+    const flt = (ui.adminDevFilter ||= { buildings: [], status: "" });
+    if ("building" in flt) { if (flt.building) flt.buildings = [flt.building]; delete flt.building; } // migrate old single-select
+    if (!Array.isArray(flt.buildings)) flt.buildings = [];
     const buildingsFlat = D.org.flatMap((l) => l.buildings.map((b) => ({ id: b.id, name: b.name, loc: l.name })));
-    const buildingSel = el(
-      "select",
-      { class: "filter-sel", onchange: (e) => { flt.building = e.target.value; render(); } },
-      el("option", { value: "", selected: !flt.building }, "All houses/buildings"),
-      ...buildingsFlat.map((b) => el("option", { value: b.id, selected: flt.building === b.id }, buildingsFlat.length && D.org.length > 1 ? `${b.loc} · ${b.name}` : b.name))
+    // drop any selected buildings that no longer exist
+    flt.buildings = flt.buildings.filter((id) => buildingsFlat.some((b) => b.id === id));
+    const buildingChks = checkboxGroup(
+      buildingsFlat.map((b) => ({ value: b.id, label: D.org.length > 1 ? `${b.loc} · ${b.name}` : b.name })),
+      flt.buildings,
+      () => render(),
+      { allLabel: "All houses" }
     );
     const statusSel = el(
       "select",
@@ -1941,7 +1984,7 @@
       ...[["", "All statuses"], ["online", "Online only"], ["offline", "Offline only"], ["stale", "Outdated only"]].map(([v, t]) => el("option", { value: v, selected: flt.status === v }, t))
     );
     let devs = all.slice();
-    if (flt.building) devs = devs.filter((d) => d.buildingId === flt.building);
+    if (flt.buildings.length) devs = devs.filter((d) => flt.buildings.includes(d.buildingId));
     if (flt.status === "online") devs = devs.filter((d) => d.online);
     else if (flt.status === "offline") devs = devs.filter((d) => !d.online);
     else if (flt.status === "stale") devs = devs.filter(isStale);
@@ -2054,7 +2097,7 @@
     const actions = el(
       "div",
       { class: "dev-filters" },
-      buildingSel,
+      buildingsFlat.length > 1 ? el("div", { class: "filter-field" }, el("span", { class: "filter-label" }, "Houses:"), buildingChks) : null,
       statusSel,
       el("span", { class: "muted small" }, `${onlineCount(devs)}/${devs.length} shown`),
       manualNeeded ? el("span", { class: "muted small manual-note", title: "These run an older agent from before remote updates — install once manually, then they update from here." }, `⚠ ${manualNeeded} need a one-time manual install`) : null,

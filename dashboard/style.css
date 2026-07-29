@@ -1217,6 +1217,48 @@ details.apps .procs {
   font-size: 12.5px;
   padding: 5px 8px;
 }
+.filter-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.filter-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+/* "select all that apply" chip checkboxes */
+.chk-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chk-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 12.5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.12s, background 0.12s;
+}
+.chk-chip:hover {
+  border-color: var(--id-green);
+}
+.chk-chip.on {
+  border-color: var(--id-green);
+  background: var(--id-green-soft);
+  color: var(--brand-ink);
+  font-weight: 600;
+}
+.chk-chip.all {
+  font-style: italic;
+}
 .ver {
   font-size: 11.5px;
   color: var(--muted);
