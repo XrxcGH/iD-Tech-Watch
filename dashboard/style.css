@@ -1495,6 +1495,34 @@ details.apps .procs {
   align-items: center;
   gap: 6px;
 }
+.chip.rule.site {
+  background: rgba(59, 130, 246, 0.12);
+  color: #2563eb;
+  border-color: rgba(59, 130, 246, 0.35);
+}
+:root[data-theme="dark"] .chip.rule.site {
+  color: #7db3ff;
+}
+/* the website add box sits alongside the app combobox in the rules bar */
+.combo.site-add {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex: 1;
+  min-width: 240px;
+}
+.combo.site-add .combo-input {
+  flex: 1;
+}
+/* whole-building control block above the class picker */
+.building-controls {
+  margin-bottom: 18px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+.building-controls .class-header {
+  margin-bottom: 10px;
+}
 .chip-x {
   border: none;
   background: transparent;
