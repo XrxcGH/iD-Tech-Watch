@@ -1214,6 +1214,112 @@ details.apps .procs {
 .room-wrap.locked .seat {
   cursor: pointer;
 }
+/* building lab layout: every classroom placed on one house canvas */
+.lab-view {
+  margin-top: 14px;
+}
+.lab-front-label {
+  text-align: center;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--id-green);
+  border-bottom: 2px solid var(--id-green);
+  padding-bottom: 6px;
+  margin-bottom: 14px;
+  text-transform: uppercase;
+  font-size: 13px;
+}
+/* the house canvas: rooms are absolutely placed and draggable within it */
+.lab-canvas-area {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  min-height: 420px;
+  background-color: var(--card);
+  /* faint grid to hint the snap positions for rooms */
+  background-image: linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 5% 6.25%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.lab-room {
+  position: absolute;
+  width: 18.5%;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 6px 6px 7px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.16);
+}
+.lab-room.movable {
+  border-color: var(--id-green);
+}
+.lab-room.dragging {
+  z-index: 6;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.32);
+  border-color: var(--id-green);
+}
+.lab-room-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 6px;
+  touch-action: none;
+}
+.lab-room.movable .lab-room-head {
+  cursor: grab;
+}
+.lab-room.dragging .lab-room-head {
+  cursor: grabbing;
+}
+.lab-room-name {
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 6px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lab-room-name:hover {
+  background: var(--id-green-soft);
+}
+.lab-canvas {
+  width: 100%;
+}
+.lab-canvas .room-front {
+  font-size: 9px;
+  padding: 1px 0;
+}
+.lab-canvas .seat {
+  min-width: 16px;
+  min-height: 16px;
+  padding: 2px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.lab-canvas .seat-name {
+  display: none;
+}
+.lab-canvas .seat-screen {
+  font-size: 10px;
+  line-height: 1;
+}
+.lab-canvas .seat-dot {
+  width: 6px;
+  height: 6px;
+}
+.lab-canvas .seat-badge {
+  font-size: 8px;
+  padding: 0 2px;
+}
 /* admin computers: filters + version badge */
 .dev-filters {
   display: flex;
