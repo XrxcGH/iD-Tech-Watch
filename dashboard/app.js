@@ -1164,10 +1164,17 @@
   // chart laid out from that class's saved positions. Drag a room by its title
   // bar to arrange the house (positions persist per building, just like seats);
   // tap a room's title to drill into it; tap a computer to control it.
+  // The house canvas shows a 20 x 16 grid (cells of 5% x 6.25%). Rooms are sized
+  // and snapped in whole grid cells so every edge lands on a grid line.
+  const LAB_SNAP_X = 20; // 20 columns -> snap to the 5% background lines
+  const LAB_SNAP_Y = 16; // 16 rows    -> snap to the 6.25% background lines
+  const ROOM_CELLS_W = 3; // each room is 3 cells wide (15% of the canvas)
+  const ROOM_CELLS_H = 5; // ...and 5 rows tall (must match .lab-room height)
+  const ROOM_W = ROOM_CELLS_W / LAB_SNAP_X; // 0.15
+  const ROOM_H = ROOM_CELLS_H / LAB_SNAP_Y; // 0.3125
   const LAB_PER_ROW = 5; // default rooms across before wrapping to a new row
-  const ROOM_W = 0.185; // each room's width as a fraction of the canvas
-  const LAB_SNAP_X = 40; // fine snap grid for a room's top-left corner
-  const LAB_SNAP_Y = 24;
+  const LAB_COL_STEP = 4 / LAB_SNAP_X; // 4 cells per room slot: 3 wide + 1 gap
+  const LAB_ROW_STEP = 6 / LAB_SNAP_Y; // 6 rows between stacked rows of rooms
   function roomLayoutKey(buildingId) {
     return "rooms:" + buildingId;
   }
@@ -1176,12 +1183,12 @@
     if (saved && typeof saved.x === "number") return saved;
     const col = i % LAB_PER_ROW;
     const row = Math.floor(i / LAB_PER_ROW);
-    return { x: Math.min(1 - ROOM_W, 0.01 + col * (ROOM_W + 0.015)), y: 0.05 + row * 0.5 };
+    return { x: Math.min(1 - ROOM_W, col * LAB_COL_STEP), y: 1 / LAB_SNAP_Y + row * LAB_ROW_STEP };
   }
   function snapRoom(x, y) {
     const cx = Math.round(x * LAB_SNAP_X) / LAB_SNAP_X;
     const cy = Math.round(y * LAB_SNAP_Y) / LAB_SNAP_Y;
-    return { x: Math.max(0, Math.min(1 - ROOM_W, cx)), y: Math.max(0, Math.min(0.98, cy)) };
+    return { x: Math.max(0, Math.min(1 - ROOM_W, cx)), y: Math.max(0, Math.min(1 - ROOM_H, cy)) };
   }
   function setRoomPosition(buildingId, roomId, x, y) {
     (D.layouts[roomLayoutKey(buildingId)] ||= {})[roomId] = { x, y }; // optimistic

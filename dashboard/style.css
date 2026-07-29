@@ -1247,12 +1247,19 @@ details.apps .procs {
 }
 .lab-room {
   position: absolute;
-  width: 18.5%;
+  /* sized in whole grid cells so the card lands on the grid: 3 cells wide,
+     5 rows tall (must match ROOM_W / room height in app.js) */
+  width: 15%;
+  height: 31.25%;
+  min-height: 118px;
+  display: flex;
+  flex-direction: column;
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 10px;
-  padding: 6px 6px 7px;
+  padding: 5px 5px 6px;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.16);
+  overflow: hidden;
 }
 .lab-room.movable {
   border-color: var(--id-green);
@@ -1291,8 +1298,13 @@ details.apps .procs {
 .lab-room-name:hover {
   background: var(--id-green-soft);
 }
+/* mini seating canvas fills the room's remaining height (override the class
+   view's fixed 16/10 so the room card stays a clean grid-aligned box) */
 .lab-canvas {
   width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  aspect-ratio: auto;
 }
 .lab-canvas .room-front {
   font-size: 9px;
