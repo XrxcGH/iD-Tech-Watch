@@ -450,21 +450,110 @@ function registerAgent(ws, info) {
     blocked: prev.blocked || [],
     blockedSites: prev.blockedSites || [],
     sitesAvailable: prev.sitesAvailable,
-    // survives a reconnect so rebooting can't shake off a pause (see below)
+    // Both survive a reconnect so that rebooting the laptop cannot shake off
+    // what is currently in force. `blocks` mirrors the ad-hoc/timed blocks the
+    // agent was told to apply (persistent class/building rules live in config
+    // and are re-applied separately); `paused` is the standing lock.
+    blocks: prev.blocks || { apps: {}, sites: {} },
     paused: prev.paused || null,
   });
   agentWs.set(deviceId, ws);
   wsDevice.set(ws, deviceId);
   saveConfig();
 
-  // Re-apply persistent "always block" rules (apps + sites) to the (re)connecting
-  // device — building-wide first, then this class's.
-  reapplyPersistentToWs(ws, deviceId, buildingId);
-  // ...and put a still-standing pause back up. A student escaped the lock by
-  // rebooting; without this, a restart cleared the pause until an instructor
-  // noticed and re-sent it.
-  reapplyPauseToWs(ws, devices.get(deviceId));
+  reapplyEverythingToWs(ws, deviceId, buildingId);
   return deviceId;
+}
+
+// Restore EVERYTHING that is currently in force on a (re)connecting laptop.
+// Restarting the machine used to be a clean escape: the agent came back with an
+// empty head, so an active pause and any blocks an instructor had applied were
+// simply gone. The hub is the authority on what should be in effect, so on every
+// registration it resets the laptop to a known state and replays:
+//   1. unblock_all  — discard whatever the agent thinks it has, so a block that
+//                     was lifted while this laptop was offline doesn't come back
+//   2. building-wide persistent rules, then this class's (building wins)
+//   3. blocks aimed at this computer/class/building, with the time still left
+//   4. the standing pause — or an explicit resume when there isn't one
+function reapplyEverythingToWs(ws, deviceId, buildingId) {
+  const rec = devices.get(deviceId);
+  ws.sendJSON({ type: "command", action: "unblock_all", params: {} });
+  reapplyPersistentToWs(ws, deviceId, buildingId);
+  reapplyDeviceBlocks(ws, rec);
+  reapplyPauseToWs(ws, rec);
+}
+
+// Replay the ad-hoc/timed blocks recorded for this device, carrying over only
+// the time still remaining; expired ones are dropped.
+function reapplyDeviceBlocks(ws, rec) {
+  const b = rec && rec.blocks;
+  if (!b) return;
+  const now = Date.now();
+  const left = (until) => (until ? Math.max(1, Math.round((until - now) / 1000)) : 0);
+  let n = 0;
+  for (const [key, e] of Object.entries(b.apps || {})) {
+    if (e.until && e.until <= now) {
+      delete b.apps[key];
+      continue;
+    }
+    ws.sendJSON({
+      type: "command",
+      action: "block_app",
+      params: { patterns: [e.pat], exclude: e.exclude || [], mode: e.mode || "minimize", cmd_match: e.cmd || "", duration_sec: left(e.until) },
+    });
+    n++;
+  }
+  for (const [domain, e] of Object.entries(b.sites || {})) {
+    if (e.until && e.until <= now) {
+      delete b.sites[domain];
+      continue;
+    }
+    ws.sendJSON({ type: "command", action: "block_site", params: { domains: [domain], duration_sec: left(e.until) } });
+    n++;
+  }
+  if (n) console.log(`[hub] restored ${n} active block(s) to reconnecting ${rec.device_id}`);
+}
+
+// Record the blocks in force on each addressed device, so they can be replayed
+// after a restart. Mirrors what the agent keeps in memory, keyed the same way
+// ("javaw (minecraft)") so repeats replace rather than accumulate.
+function noteBlockState(target, action, params) {
+  const p = params || {};
+  const until = p.duration_sec ? Date.now() + Number(p.duration_sec) * 1000 : 0;
+  const pats = [].concat(p.patterns || [], p.pattern ? [p.pattern] : []);
+  const doms = [].concat(p.domains || [], p.domain ? [p.domain] : []);
+  const cmdAll = String(p.cmd_match || p.cmdMatch || "").toLowerCase().trim();
+  const exclude = [].concat(p.exclude || [], p.excludes || []);
+  const mode = String(p.mode || "").toLowerCase() === "kill" ? "kill" : "minimize";
+  const split = (raw) => {
+    const m = /^(.+?)\s*\(([^()]+)\)$/.exec(String(raw || "").trim());
+    return m ? { pat: m[1].trim(), cmd: m[2].trim() } : { pat: String(raw || "").trim(), cmd: cmdAll };
+  };
+  for (const deviceId of deviceIdsFor(target)) {
+    const rec = devices.get(deviceId);
+    if (!rec) continue;
+    rec.blocks = rec.blocks || { apps: {}, sites: {} };
+    const B = rec.blocks;
+    if (action === "unblock_all") {
+      rec.blocks = { apps: {}, sites: {} };
+    } else if (action === "block_app") {
+      for (const raw of pats) {
+        const { pat, cmd } = split(raw);
+        if (!pat) continue;
+        B.apps[cmd ? `${pat} (${cmd})` : pat] = { pat, cmd, exclude, mode, until };
+      }
+    } else if (action === "unblock_app") {
+      for (const raw of pats) {
+        const { pat } = split(raw);
+        delete B.apps[String(raw || "").trim()];
+        for (const key of Object.keys(B.apps)) if (B.apps[key].pat === pat) delete B.apps[key];
+      }
+    } else if (action === "block_site") {
+      for (const d of doms) if (d) B.sites[String(d).trim().toLowerCase()] = { until };
+    } else if (action === "unblock_site") {
+      for (const d of doms) delete B.sites[String(d || "").trim().toLowerCase()];
+    }
+  }
 }
 
 // Remember whether a laptop is currently paused, so the state survives the
@@ -496,7 +585,12 @@ function notePauseState(target, action, params) {
 const PAUSE_MAX_AGE_MS = 12 * 60 * 60 * 1000; // don't resurrect yesterday's pause
 function reapplyPauseToWs(ws, rec) {
   const p = rec && rec.paused;
-  if (!p) return;
+  // No pause on record — say so explicitly rather than staying silent, so a
+  // laptop can never come back still showing a lock the hub has released.
+  if (!p) {
+    ws.sendJSON({ type: "command", action: "resume", params: {} });
+    return;
+  }
   // A laptop that was shut down before an instructor resumed shouldn't boot up
   // locked the next morning. An untimed pause has no natural expiry, so age it.
   if (p.at && Date.now() - p.at > PAUSE_MAX_AGE_MS) {
@@ -582,13 +676,14 @@ function applyRule(op) {
   if (op.op === "add") {
     if (!obj[listKey].includes(v)) {
       obj[listKey].push(v);
-      if (isSite) sendCommand(target, "block_site", { domains: [v] });
-      else sendCommand(target, "block_app", { patterns: [v] });
+      // track:false — these live in the org tree and are replayed from there
+      if (isSite) sendCommand(target, "block_site", { domains: [v] }, { track: false });
+      else sendCommand(target, "block_app", { patterns: [v] }, { track: false });
     }
   } else if (op.op === "remove") {
     obj[listKey] = obj[listKey].filter((x) => x !== v);
-    if (isSite) sendCommand(target, "unblock_site", { domain: v });
-    else sendCommand(target, "unblock_app", { pattern: v });
+    if (isSite) sendCommand(target, "unblock_site", { domain: v }, { track: false });
+    else sendCommand(target, "unblock_app", { pattern: v }, { track: false });
     // removing a class rule must not lift a building-wide block of the same thing
     if (scope === "class") reapplyPersistentForTarget(target);
   }
@@ -752,12 +847,18 @@ function deviceIdsFor(target) {
   return out;
 }
 
-function sendCommand(target, action, params) {
+// `track: false` for commands whose state already lives in config (the
+// persistent always-block rules), so they aren't recorded twice.
+function sendCommand(target, action, params, opts) {
   const command = { type: "command", action, params: params || {} };
-  // Record pause intent against every addressed device (including ones that are
-  // currently offline) so a reboot can't shed a standing pause, and a Resume
-  // sent while a laptop is down still releases it.
+  // Record intent against every addressed device (including ones that are
+  // currently offline) so a reboot can't shed what's in force, and a Resume or
+  // unblock sent while a laptop is down still takes effect when it returns.
   if (action === "pause" || action === "resume") notePauseState(target, action, params);
+  if (!opts || opts.track !== false) {
+    if (action === "block_app" || action === "unblock_app" || action === "block_site" || action === "unblock_site" || action === "unblock_all")
+      noteBlockState(target, action, params);
+  }
   let sent = 0;
   for (const ws of targetsFor(target)) {
     ws.sendJSON(command);
