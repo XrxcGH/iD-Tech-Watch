@@ -462,8 +462,22 @@ function registerAgent(ws, info) {
     blocks: prev.blocks || ((config.deviceState || {})[deviceId] || {}).blocks || { apps: {}, sites: {} },
     paused: prev.paused || ((config.deviceState || {})[deviceId] || {}).paused || null,
   });
+  // If this device already had a socket (the old agent during a remote update,
+  // or a reconnect whose previous socket hasn't timed out yet), drop the stale
+  // one deliberately rather than leaving two live agents for the same laptop.
+  // disconnectAgent's guard makes the resulting close event a no-op.
+  // Bind the NEW socket first, THEN close the old one: closing first would run
+  // the old socket's teardown while it was still the mapped socket, marking the
+  // laptop offline and producing a spurious offline/online blip on the dashboard.
+  // With this order the old close lands on the "superseded" guard and is a no-op.
+  const prevWs = agentWs.get(deviceId);
   agentWs.set(deviceId, ws);
   wsDevice.set(ws, deviceId);
+  if (prevWs && prevWs !== ws) {
+    try {
+      prevWs.close();
+    } catch (_) {}
+  }
   saveConfig();
 
   reapplyEverythingToWs(ws, deviceId, buildingId);
@@ -702,6 +716,9 @@ function updateDevice(ws, data) {
   const deviceId = wsDevice.get(ws);
   const rec = deviceId && devices.get(deviceId);
   if (!rec) return null;
+  // NOTE: deliberately does NOT re-bind agentWs to this socket. Routing follows
+  // the most recent *registration* only — letting a heartbeat claim the route
+  // would make two briefly-coexisting agents flap it back and forth.
   for (const key of ["windows", "activeWindow", "processes", "blocked", "blockedSites", "sitesAvailable"])
     if (key in data) rec[key] = data[key];
   rec.online = true;
@@ -713,11 +730,23 @@ function disconnectAgent(ws) {
   const deviceId = wsDevice.get(ws);
   if (deviceId) {
     wsDevice.delete(ws);
-    agentWs.delete(deviceId);
-    const rec = devices.get(deviceId);
-    if (rec) {
-      rec.online = false;
-      rec.last_seen = Date.now() / 1000;
+    // Only tear the device down if THIS socket is still the live one.
+    //
+    // A remote update hands over by starting a replacement agent, which
+    // registers before the old process's socket has finished closing. Deleting
+    // unconditionally removed the NEW socket from agentWs, so the laptop went on
+    // heartbeating (dashboard: online) while every command was silently dropped
+    // — "goes offline for a second, comes back, then ignores everything".
+    if (agentWs.get(deviceId) === ws) {
+      agentWs.delete(deviceId);
+      const rec = devices.get(deviceId);
+      if (rec) {
+        rec.online = false;
+        rec.last_seen = Date.now() / 1000;
+      }
+    } else {
+      console.log(`[hub] superseded socket for ${deviceId} closed — keeping the newer one`);
+      return null; // not a real disconnect; don't log the laptop as offline
     }
   }
   return deviceId;
@@ -1127,9 +1156,13 @@ function handleAgent(ws) {
   };
   ws.onclose = () => {
     if (registered) {
+      // null = this socket had already been superseded by a newer registration
+      // (a remote-update hand-off), so the laptop is not actually going offline.
       const id = disconnectAgent(ws);
-      console.log(`[hub] agent offline: ${id}`);
-      broadcastState();
+      if (id) {
+        console.log(`[hub] agent offline: ${id}`);
+        broadcastState();
+      }
     }
   };
 }
