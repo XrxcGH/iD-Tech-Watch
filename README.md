@@ -129,12 +129,20 @@ the block chips, so a chip can be handed straight back to unblock it.
 
 **Pause** — **⏸ Pause** covers every screen with a full-screen "eyes up front"
 overlay that **reopens if a student closes it**, until you press **▶ Resume**.
-While paused the agent suppresses the usual escape routes (Windows key, Alt+Tab,
+While paused the agent suppresses the usual escape routes (Windows key — which
+also stops **Win+Ctrl+←/→ hopping to another virtual desktop** — Alt+Tab,
 Alt+Esc, **Alt+F4**, Alt+Space, Ctrl+Esc, Ctrl+Shift+Esc), refuses any close it
 did not initiate, and **survives a reboot** — a laptop that restarts while paused
 gets the lock straight back when it reconnects (a timed pause resumes with only
 the time still left on it). Ctrl+Alt+Del is a kernel-level sequence and cannot be
 blocked from user mode.
+
+A **locked** full-screen message holds the machine the same way a pause does: for
+as long as its hold is running it installs the same key lock, so it can't be
+Alt+F4'd away *or* escaped with **Win+Ctrl+←/→ onto another virtual desktop**
+(which used to leave the student with a free computer while the instructor's
+screen still showed the message). The lock lifts the instant the message becomes
+dismissible.
 
 **Message / Lock (one composer)** — the **✉ Message / Lock…** button opens a real
 in-app dialog (no browser pop-ups) that does both jobs: a **Pop-up message** (a
@@ -403,6 +411,10 @@ the old copy, writes the new one (leaving `watch-config.json` — device name/se
 reinstall. A bad push is refused (kept the running version). The **Computers** admin
 table shows each laptop's version and an **Update** button (plus "Update all"); the
 hub compares each agent's `build` against its own to flag outdated laptops.
+**Only the app restarts, and it does that itself** — the laptop is *not* rebooted
+and the student doesn't have to do anything. The agent writes the new files, then
+re-launches through the installed launcher, which clean-restarts both workers on
+the fresh code (a few seconds). A full reboot is never required for an update.
 `send_keys` presses a `keys` combo (`"win+d"`, `"ctrl+w"`, `"alt+F4"`, …) on the
 front window via `keybd_event`. `run_command` runs a shell `command` — it is
 **admin-only** (hub-enforced) and each agent ignores it unless started with
@@ -488,9 +500,9 @@ state and replays, in order:
    never come back showing a lock the hub has already released
 
 So a student who reboots mid-pause logs back in and is paused again, with their
-blocks intact. Ad-hoc blocks are tracked in hub memory (persistent always-block
-rules live in `config.json` and additionally survive a hub restart); a pause older
-than 12 hours is dropped rather than resurrected the next morning.
+blocks intact. This state is **also written to `config.json`**, so it survives the
+**hub** restarting too — not just the laptop. A pause older than 12 hours is
+dropped rather than resurrected the next morning.
 
 > A determined student with **local administrator rights** can still remove any of
 > this. Real lockdown is an MDM/kiosk policy — this raises the bar for a standard

@@ -49,7 +49,7 @@ const IS_MAC = process.platform === "darwin";
 
 // Build stamp — logged on startup so you can confirm which agent version a
 // laptop is actually running (see watch-client.log in the install folder).
-const BUILD = "2026-07-30 cmdline-blocks · restart-proof-autostart";
+const BUILD = "2026-07-30 fullscreen-capture · desktop-hop-lock · state-cache";
 
 const ENFORCE_INTERVAL_MS = 2000; // how often to sweep the blocklists
 const STATUS_INTERVAL_DEFAULT = 4; // seconds between status reports
@@ -379,6 +379,43 @@ async function minimizeMatchingMany(blocks) {
   return parseInt(m[1], 10);
 }
 
+// Low-level keyboard lock, shared by the pause overlay AND the locked
+// full-screen message. Suppresses only — it never records a key — and is
+// removed the moment the lock ends.
+//
+// The Windows-key suppression is what stops a student sliding out of a
+// full-screen lock with Win+Ctrl+←/→ onto another virtual desktop, which left
+// them with a free machine while the instructor's screen still showed the lock.
+const LOCK_CSHARP = [
+  "using System;",
+  "using System.Runtime.InteropServices;",
+  "public static class IDTLock {",
+  "  public delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);",
+  "  [DllImport(\"user32.dll\")] static extern IntPtr SetWindowsHookEx(int idHook, HookProc lpfn, IntPtr hMod, uint dwThreadId);",
+  "  [DllImport(\"user32.dll\")] static extern bool UnhookWindowsHookEx(IntPtr hhk);",
+  "  [DllImport(\"user32.dll\")] static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);",
+  "  [DllImport(\"kernel32.dll\")] static extern IntPtr GetModuleHandle(string name);",
+  "  [DllImport(\"user32.dll\")] static extern short GetAsyncKeyState(int vKey);",
+  "  [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);",
+  "  static IntPtr hook = IntPtr.Zero;",
+  "  static HookProc proc = HookCallback;",
+  "  const int WH_KEYBOARD_LL = 13;",
+  "  public static void Install(){ if(hook==IntPtr.Zero){ hook = SetWindowsHookEx(WH_KEYBOARD_LL, proc, GetModuleHandle(null), 0); } }",
+  "  public static void Uninstall(){ if(hook!=IntPtr.Zero){ UnhookWindowsHookEx(hook); hook=IntPtr.Zero; } }",
+  "  static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam){",
+  "    if(nCode>=0){",
+  "      int vk = Marshal.ReadInt32(lParam);",
+  "      bool alt=(GetAsyncKeyState(0x12)&0x8000)!=0; bool ctrl=(GetAsyncKeyState(0x11)&0x8000)!=0;",
+  "      if(vk==0x5B||vk==0x5C) return (IntPtr)1;",          // LWIN / RWIN (kills Win+Ctrl+Arrow desktop hop, Win+D/Tab/M/R)
+  "      if(alt && (vk==0x09||vk==0x1B)) return (IntPtr)1;", // Alt+Tab, Alt+Esc
+  "      if(alt && (vk==0x73||vk==0x20)) return (IntPtr)1;", // Alt+F4 (closes the lock, then opens Shut Down), Alt+Space (window menu -> Close)
+  "      if(ctrl && vk==0x1B) return (IntPtr)1;",            // Ctrl+Esc (Start), Ctrl+Shift+Esc (Task Manager)
+  "    }",
+  "    return CallNextHookEx(hook, nCode, wParam, lParam);",
+  "  }",
+  "}",
+].join("\n");
+
 // Full-screen instructor message.
 //   holdSec       — the OK button is HIDDEN and the window cannot be closed
 //                   until this many seconds pass (a live countdown shows the
@@ -395,7 +432,7 @@ function showMessage(text, holdSec, autoCloseSec) {
   try {
     if (IS_WIN) {
       const safe = text.replace(/'/g, "''");
-      const ps =
+      const body =
         "Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase; " +
         "$script:rem=" + holdSec + "; $script:auto=" + autoCloseSec + "; $script:forceClose=$false; " +
         "$w=New-Object System.Windows.Window; $w.WindowStyle='None'; $w.WindowState='Maximized'; " +
@@ -418,9 +455,24 @@ function showMessage(text, holdSec, autoCloseSec) {
         "$tm=New-Object System.Windows.Threading.DispatcherTimer; $tm.Interval=[TimeSpan]::FromSeconds(1); " +
         "$tm.Add_Tick({ " +
         "if($script:rem -gt 0){ $script:rem--; if($script:rem -le 0){ $b.Visibility='Visible'; $cd.Text='' } else { $cd.Text=(\"You can dismiss this in {0}s\" -f $script:rem) } } " +
-        "if($script:auto -gt 0){ $script:auto--; if($script:auto -le 0){ $script:rem=0; $script:forceClose=$true; $tm.Stop(); $w.Close() } } }); " +
+        "if($script:auto -gt 0){ $script:auto--; if($script:auto -le 0){ $script:rem=0; $script:forceClose=$true; $tm.Stop(); $w.Close() } } " +
+        // drop the keyboard lock the moment the message stops being compulsory
+        "if($script:rem -le 0 -and $script:locked){ $script:locked=$false; [IDTLock]::Uninstall() } }); " +
         "$w.Add_Loaded({ $tm.Start() }) } " +
-        "$w.Add_Loaded({ [void]$w.Activate() }); [void]$w.ShowDialog();";
+        // While the message is LOCKED, hold it the same way the pause screen does:
+        // install the keyboard lock (which suppresses the Windows key, so
+        // Win+Ctrl+arrow can't slide the student onto a clean virtual desktop and
+        // out of the message) and re-grab the foreground on a timer.
+        "$script:locked=$false; " +
+        "$w.Add_Loaded({ [void]$w.Activate(); " +
+        "  if($script:rem -gt 0){ $script:locked=$true; [IDTLock]::Install(); " +
+        "    $hh=(New-Object System.Windows.Interop.WindowInteropHelper $w).Handle; " +
+        "    $fg=New-Object System.Windows.Threading.DispatcherTimer; $fg.Interval=[TimeSpan]::FromMilliseconds(250); " +
+        "    $fg.Add_Tick({ if($script:rem -gt 0){ [void][IDTLock]::SetForegroundWindow($hh); $w.Topmost=$true } else { $fg.Stop() } }); $fg.Start() } }); " +
+        "$w.Add_Closed({ [IDTLock]::Uninstall() }); " +
+        "[void]$w.ShowDialog();";
+      // the shared lock class has to exist before the window script runs
+      const ps = "$src = @'\n" + LOCK_CSHARP + "\n'@\nAdd-Type -TypeDefinition $src -ErrorAction SilentlyContinue\n" + body;
       execFile("powershell", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps], { windowsHide: true }, () => {});
     } else if (IS_MAC) {
       const safe = text.replace(/"/g, '\\"');
@@ -876,12 +928,27 @@ function runRemoteCommand(ws, cmdline, requestId) {
 function screenshotLoopScript() {
   return (
     "Add-Type -AssemblyName System.Drawing,System.Windows.Forms; " +
+    // MUST come before anything measures the screen. Without it PowerShell is a
+    // DPI-unaware process, so Windows reports the *scaled* desktop size (e.g.
+    // 1600x1067 on a 2400x1600 screen at 150%) while CopyFromScreen copies
+    // PHYSICAL pixels — you get the top-left ~44% of the screen and nothing else.
+    // That was the "screenshot is stuck to the top-left corner" bug.
+    "Add-Type -Namespace IDTs -Name Dpi -MemberDefinition '" +
+    "[DllImport(\"user32.dll\")] public static extern bool SetProcessDPIAware();" +
+    "[DllImport(\"user32.dll\")] public static extern int GetSystemMetrics(int i);" +
+    "'; [void][IDTs.Dpi]::SetProcessDPIAware(); " +
     "$tw=640; " + // scaled width (~360-480p); a tiny thumbnail, light on bandwidth
     "$enc=[System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }; " +
     "$ep=New-Object System.Drawing.Imaging.EncoderParameters 1; " +
     "$ep.Param[0]=New-Object System.Drawing.Imaging.EncoderParameter ([System.Drawing.Imaging.Encoder]::Quality,[long]42); " +
     "while($true){ try { " +
-    "$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; " +
+    // The VIRTUAL screen: the union of every monitor in true physical pixels
+    // (SM_X/Y/CX/CYVIRTUALSCREEN = 76/77/78/79), so a second display is included
+    // and the origin is right even when a monitor sits left of / above the primary.
+    "$vx=[IDTs.Dpi]::GetSystemMetrics(76); $vy=[IDTs.Dpi]::GetSystemMetrics(77); " +
+    "$vw=[IDTs.Dpi]::GetSystemMetrics(78); $vh=[IDTs.Dpi]::GetSystemMetrics(79); " +
+    "if($vw -le 0 -or $vh -le 0){ $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $vx=$b.X; $vy=$b.Y; $vw=$b.Width; $vh=$b.Height } " +
+    "$b=New-Object System.Drawing.Rectangle $vx,$vy,$vw,$vh; " +
     "$bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; " +
     "$g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size); $g.Dispose(); " +
     "$th=[int]($tw*$b.Height/$b.Width); " +
@@ -997,35 +1064,7 @@ function spawnPauseWindow() {
   if (pauseChild || !pauseActive) return;
   if (!IS_WIN) return pauseScreen(pauseMessage);
   const safe = pauseMessage.replace(/'/g, "''");
-  const csharp = [
-    "using System;",
-    "using System.Runtime.InteropServices;",
-    "public static class IDTLock {",
-    "  public delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);",
-    "  [DllImport(\"user32.dll\")] static extern IntPtr SetWindowsHookEx(int idHook, HookProc lpfn, IntPtr hMod, uint dwThreadId);",
-    "  [DllImport(\"user32.dll\")] static extern bool UnhookWindowsHookEx(IntPtr hhk);",
-    "  [DllImport(\"user32.dll\")] static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);",
-    "  [DllImport(\"kernel32.dll\")] static extern IntPtr GetModuleHandle(string name);",
-    "  [DllImport(\"user32.dll\")] static extern short GetAsyncKeyState(int vKey);",
-    "  [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);",
-    "  static IntPtr hook = IntPtr.Zero;",
-    "  static HookProc proc = HookCallback;",
-    "  const int WH_KEYBOARD_LL = 13;",
-    "  public static void Install(){ if(hook==IntPtr.Zero){ hook = SetWindowsHookEx(WH_KEYBOARD_LL, proc, GetModuleHandle(null), 0); } }",
-    "  public static void Uninstall(){ if(hook!=IntPtr.Zero){ UnhookWindowsHookEx(hook); hook=IntPtr.Zero; } }",
-    "  static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam){",
-    "    if(nCode>=0){",
-    "      int vk = Marshal.ReadInt32(lParam);",
-    "      bool alt=(GetAsyncKeyState(0x12)&0x8000)!=0; bool ctrl=(GetAsyncKeyState(0x11)&0x8000)!=0;",
-    "      if(vk==0x5B||vk==0x5C) return (IntPtr)1;",          // LWIN / RWIN (kills Win+Ctrl+Arrow, Win+D/Tab/M/R)
-    "      if(alt && (vk==0x09||vk==0x1B)) return (IntPtr)1;", // Alt+Tab, Alt+Esc
-    "      if(alt && (vk==0x73||vk==0x20)) return (IntPtr)1;", // Alt+F4 (closes the lock, then opens Shut Down), Alt+Space (window menu -> Close)
-    "      if(ctrl && vk==0x1B) return (IntPtr)1;",            // Ctrl+Esc (Start), Ctrl+Shift+Esc (Task Manager)
-    "    }",
-    "    return CallNextHookEx(hook, nCode, wParam, lParam);",
-    "  }",
-    "}",
-  ].join("\n");
+  const csharp = LOCK_CSHARP;
   const win =
     "Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase; " +
     "$script:allowClose=$false; " +
