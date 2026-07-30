@@ -49,7 +49,7 @@ const IS_MAC = process.platform === "darwin";
 
 // Build stamp — logged on startup so you can confirm which agent version a
 // laptop is actually running (see watch-client.log in the install folder).
-const BUILD = "2026-07-28 pause-lock · remote-update · screen-view";
+const BUILD = "2026-07-29 minimize-blocks · alt-f4-lock · timed-message";
 
 const ENFORCE_INTERVAL_MS = 2000; // how often to sweep the blocklists
 const STATUS_INTERVAL_DEFAULT = 4; // seconds between status reports
@@ -195,19 +195,16 @@ async function killMatching(pattern) {
   return killMatchingMany([{ pat: pattern, exclude: [] }]);
 }
 
-// Terminate every process matching ANY of `blocks` in a SINGLE PowerShell call.
-// Each block = { pat, exclude:[substrings] }. Batching one sweep into one
-// spawn (instead of one spawn per pattern) is what makes repeated/large blocks
-// reliable — the old per-pattern loop spawned N PowerShells every 2s and, once
-// enforcement congested, kills started missing (the "first attempt works, later
-// ones don't" bug).
-async function killMatchingMany(blocks) {
+// Build the process-name match clauses shared by the kill and minimize sweeps.
+// Each block = { pat, exclude:[substrings] } — `exclude` lets a block match a
+// family but spare a sibling (block Roblox Player, keep Roblox Studio).
+function matchClauses(blocks) {
   const clauses = [];
-  const macos = [];
+  const pats = [];
   for (const b of blocks || []) {
     const pat = safePat(b && b.pat);
     if (!pat) continue;
-    macos.push(pat);
+    pats.push(pat);
     let clause = `$n -like '*${pat}*'`;
     for (const e of (b.exclude || [])) {
       const ex = safePat(e);
@@ -215,6 +212,19 @@ async function killMatchingMany(blocks) {
     }
     clauses.push(`(${clause})`);
   }
+  return { clauses, pats };
+}
+
+// Terminate every process matching ANY of `blocks` in a SINGLE PowerShell call.
+// Batching one sweep into one spawn (instead of one spawn per pattern) is what
+// makes repeated/large blocks reliable — the old per-pattern loop spawned N
+// PowerShells every 2s and, once enforcement congested, kills started missing
+// (the "first attempt works, later ones don't" bug).
+//
+// NOTE: this is no longer the default for app blocks — see minimizeMatchingMany.
+// Force-terminating a game client is what got student Roblox accounts flagged.
+async function killMatchingMany(blocks) {
+  const { clauses, pats: macos } = matchClauses(blocks);
   if (!clauses.length) return [];
   const killed = [];
   if (IS_WIN) {
@@ -239,6 +249,70 @@ async function killMatchingMany(blocks) {
     }
   }
   return killed;
+}
+
+// Find every visible, titled, not-already-minimized top-level window owned by
+// the given PIDs and minimize it.
+//   * EnumWindows + GetWindowThreadProcessId (not .NET MainWindowHandle, which
+//     is 0 for a surprising number of apps) so we actually find game windows.
+//   * SW_FORCEMINIMIZE (11) so a busy or full-screen client still goes down.
+//   * Opens NO handle on the target process and injects NO input.
+const MIN_CSHARP = [
+  "using System;",
+  "using System.Collections.Generic;",
+  "using System.Runtime.InteropServices;",
+  "public static class IDTWin {",
+  "  public delegate bool EnumProc(IntPtr h, IntPtr p);",
+  "  [DllImport(\"user32.dll\")] static extern bool EnumWindows(EnumProc cb, IntPtr p);",
+  "  [DllImport(\"user32.dll\")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);",
+  "  [DllImport(\"user32.dll\")] static extern bool IsWindowVisible(IntPtr h);",
+  "  [DllImport(\"user32.dll\")] static extern bool IsIconic(IntPtr h);",
+  "  [DllImport(\"user32.dll\")] static extern bool ShowWindow(IntPtr h, int n);",
+  "  [DllImport(\"user32.dll\")] static extern int GetWindowTextLength(IntPtr h);",
+  "  const int SW_FORCEMINIMIZE = 11;",
+  "  public static int Minimize(uint[] pids) {",
+  "    int n = 0;",
+  "    var set = new HashSet<uint>(pids);",
+  "    EnumProc cb = delegate(IntPtr h, IntPtr l) {",
+  "      uint pid; GetWindowThreadProcessId(h, out pid);",
+  "      if (set.Contains(pid) && IsWindowVisible(h) && !IsIconic(h) && GetWindowTextLength(h) > 0) {",
+  "        ShowWindow(h, SW_FORCEMINIMIZE); n++;",
+  "      }",
+  "      return true;",
+  "    };",
+  "    EnumWindows(cb, IntPtr.Zero);",
+  "    GC.KeepAlive(cb);",
+  "    return n;",
+  "  }",
+  "}",
+].join("\n");
+
+// Minimize — rather than kill — every window of the processes matching `blocks`.
+// This is the DEFAULT enforcement for app blocks.
+//
+// WHY: repeatedly force-terminating a game client from an outside process is
+// exactly the signature anti-cheat looks for (Roblox's Hyperion), and student
+// accounts were being flagged for cheating/macros and disabled for the day.
+// Minimizing touches only the window manager — no process handle, no injected
+// keystrokes — so it does not look like tampering. The enforce loop re-runs
+// every couple of seconds, so a window the student restores is pushed straight
+// back down and the game stays unusable without ever being killed.
+// Already-minimized windows are skipped, so a steady state costs nothing and
+// never steals focus.
+async function minimizeMatchingMany(blocks) {
+  const { clauses } = matchClauses(blocks);
+  if (!clauses.length) return 0;
+  // No window-manager equivalent off Windows; fall back to the old behaviour
+  // there rather than silently doing nothing (camp laptops are all Windows).
+  if (!IS_WIN) return (await killMatchingMany(blocks)).length;
+  const ps =
+    "$src = @'\n" + MIN_CSHARP + "\n'@\n" +
+    "Add-Type -TypeDefinition $src -ErrorAction SilentlyContinue\n" +
+    `$ids = @(Get-Process | Where-Object { $n=$_.ProcessName; ${clauses.join(" -or ")} } | ForEach-Object { [uint32]$_.Id }); ` +
+    "if ($ids.Count -gt 0) { [IDTWin]::Minimize($ids) } else { 0 }";
+  const out = await run("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps]);
+  const m = /(\d+)\s*$/.exec(String(out).trim());
+  return m ? parseInt(m[1], 10) : 0;
 }
 
 // Full-screen instructor message.
@@ -400,9 +474,22 @@ async function enforce() {
   if (enforcing) return;
   enforcing = true;
   try {
-    const blocks = [...activeAppBlocks()].map(([pat, meta]) => ({ pat, exclude: (meta && meta.exclude) || [] }));
-    if (blocks.length) {
-      const killed = await killMatchingMany(blocks);
+    // Blocks are enforced by MINIMIZING by default (anti-cheat safe); only
+    // blocks explicitly sent with mode:"kill" are force-closed. Each group is
+    // still one batched sweep, so at most two PowerShell spawns per pass.
+    const minBlocks = [];
+    const killBlocks = [];
+    for (const [pat, meta] of activeAppBlocks()) {
+      const b = { pat, exclude: (meta && meta.exclude) || [] };
+      if (meta && meta.mode === "kill") killBlocks.push(b);
+      else minBlocks.push(b);
+    }
+    if (minBlocks.length) {
+      const n = await minimizeMatchingMany(minBlocks);
+      if (n > 0) log(`enforced blocks -> minimized ${n} window(s)`);
+    }
+    if (killBlocks.length) {
+      const killed = await killMatchingMany(killBlocks);
       if (killed.length && IS_WIN) log(`enforced blocks -> killed ${killed.join(", ")}`);
     }
     enforceSites();
@@ -417,6 +504,7 @@ async function sendStatus(ws) {
   const blocked = [...activeAppBlocks()].map(([pattern, meta]) => ({
     pattern,
     expires_at: meta && meta.expiry ? meta.expiry / 1000 : 0,
+    mode: meta && meta.mode === "kill" ? "kill" : "minimize",
   }));
   const blockedSites = [...activeSiteBlocks()].map(([domain, exp]) => ({
     domain,
@@ -458,11 +546,16 @@ async function handleCommand(ws, msg) {
   } else if (action === "block_app") {
     const pats = collectPatterns(p);
     const exclude = collectExcludes(p);
-    for (const pat of pats) appBlocks.set(pat, { expiry, exclude });
-    // one batched kill now (not one PowerShell per pattern) so the first hit is snappy
+    // Default to minimizing. Only an explicit mode:"kill" force-closes, so an
+    // older hub (which sends no mode) gets the safe behaviour automatically.
+    const mode = String(p.mode || "").toLowerCase() === "kill" ? "kill" : "minimize";
+    for (const pat of pats) appBlocks.set(pat, { expiry, exclude, mode });
+    // one batched sweep now (not one PowerShell per pattern) so the first hit is snappy
     if (pats.length) {
-      await killMatchingMany(pats.map((pat) => ({ pat, exclude })));
-      log(`blocking apps: ${pats.join(", ")}${exclude.length ? ` (except ${exclude.join(", ")})` : ""} (${p.duration_sec ? p.duration_sec + "s" : "until lifted"})`);
+      const blocks = pats.map((pat) => ({ pat, exclude }));
+      if (mode === "kill") await killMatchingMany(blocks);
+      else await minimizeMatchingMany(blocks);
+      log(`blocking apps (${mode}): ${pats.join(", ")}${exclude.length ? ` (except ${exclude.join(", ")})` : ""} (${p.duration_sec ? p.duration_sec + "s" : "until lifted"})`);
     }
   } else if (action === "unblock_app") {
     for (const pat of collectPatterns(p)) appBlocks.delete(pat);
@@ -559,15 +652,26 @@ function closeCurrentTab() {
 // SendKeys('#m'): synthetic Win+M is UIPI-blocked from an elevated agent, but a
 // window message from high→medium integrity (the agent → explorer's tray) is
 // allowed, so this works elevated or not.
-// Show/hide the desktop — a REVERSIBLE toggle (Win+D). First press minimizes
-// every window; a second press restores them (Windows itself tracks the state,
-// so it stays in sync even if the student manually restored something). We
-// inject Win+D with keybd_event: it's a shell-level hotkey (not tied to which
-// window has focus) and works elevated. Replaces the old one-way tray MIN_ALL.
+// Show/hide the desktop — a REVERSIBLE toggle. Driven through the shell's own
+// COM automation (Shell.Application MinimizeAll / UndoMinimizeALL) rather than
+// by injecting Win+D with keybd_event.
+//
+// WHY NOT Win+D: injected keystrokes carry the LLKHF_INJECTED flag and game
+// anti-cheat watches for them as macro/automation activity — the same class of
+// problem that got student Roblox accounts flagged. The COM route asks the
+// shell to do exactly what Win+D does, with no synthetic input at all.
+let desktopShown = false; // our view of the toggle (COM has no "is shown" query)
 function minimizeAll() {
   if (!IS_WIN) return;
-  pressVks([0x5b, 0x44]); // Win (LWIN) + D  → toggle show-desktop
-  log("toggle desktop (Win+D)");
+  const method = desktopShown ? "UndoMinimizeALL" : "MinimizeAll";
+  desktopShown = !desktopShown;
+  run("powershell", [
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    `(New-Object -ComObject Shell.Application).${method}()`,
+  ]);
+  log(`toggle desktop (${method})`);
 }
 
 // ------------------------------------------------------ generic keystroke sender
@@ -778,9 +882,14 @@ function pauseScreen(text, durationSec) {
 //   • re-grabs the foreground whenever it loses focus (defeats Alt+Tab) and on a
 //     250ms timer (defeats desktop switches and "TM on top");
 //   • installs a low-level keyboard hook WHILE PAUSED that suppresses the Windows
-//     keys (kills Win+Ctrl+Arrow, Win+D/Tab/M/R), Alt+Tab/Alt+Esc, and Ctrl+Esc /
-//     Ctrl+Shift+Esc (Start menu / Task Manager). The hook only suppresses — it
-//     never logs a key — and is removed the instant the pause ends.
+//     keys (kills Win+Ctrl+Arrow, Win+D/Tab/M/R), Alt+Tab/Alt+Esc, Alt+F4 /
+//     Alt+Space, and Ctrl+Esc / Ctrl+Shift+Esc (Start menu / Task Manager). The
+//     hook only suppresses — it never logs a key — and is removed the instant
+//     the pause ends.
+//   • refuses any close request it did not initiate (Add_Closing cancels), so
+//     even a close that dodges the hook cannot drop the student to the desktop.
+//     Alt+F4 was the live escape: it closed the lock, and a second Alt+F4 on the
+//     bare desktop opens "Shut Down Windows" — letting a student reboot out.
 //   • a 30-minute failsafe auto-closes it so a lock can never get stuck.
 // NOTE: Ctrl+Alt+Del is a kernel Secure Attention Sequence and cannot be blocked
 // from user mode; and a global keyboard hook can trip some AV heuristics (it's
@@ -811,6 +920,7 @@ function spawnPauseWindow() {
     "      bool alt=(GetAsyncKeyState(0x12)&0x8000)!=0; bool ctrl=(GetAsyncKeyState(0x11)&0x8000)!=0;",
     "      if(vk==0x5B||vk==0x5C) return (IntPtr)1;",          // LWIN / RWIN (kills Win+Ctrl+Arrow, Win+D/Tab/M/R)
     "      if(alt && (vk==0x09||vk==0x1B)) return (IntPtr)1;", // Alt+Tab, Alt+Esc
+    "      if(alt && (vk==0x73||vk==0x20)) return (IntPtr)1;", // Alt+F4 (closes the lock, then opens Shut Down), Alt+Space (window menu -> Close)
     "      if(ctrl && vk==0x1B) return (IntPtr)1;",            // Ctrl+Esc (Start), Ctrl+Shift+Esc (Task Manager)
     "    }",
     "    return CallNextHookEx(hook, nCode, wParam, lParam);",
@@ -819,6 +929,7 @@ function spawnPauseWindow() {
   ].join("\n");
   const win =
     "Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase; " +
+    "$script:allowClose=$false; " +
     "$w=New-Object System.Windows.Window; $w.WindowStyle='None'; $w.WindowState='Maximized'; " +
     "$w.Topmost=$true; $w.ResizeMode='NoResize'; $w.ShowInTaskbar=$false; " +
     "$w.Background=(New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(0,0,0))); " +
@@ -829,12 +940,18 @@ function spawnPauseWindow() {
     // snap back if anything minimizes/restores it; reclaim focus if Alt+Tabbed away
     "$w.Add_StateChanged({ if($w.WindowState -ne 'Maximized'){ $w.WindowState='Maximized' } }); " +
     "$w.Add_Deactivated({ $w.Topmost=$true; [void]$w.Activate() }); " +
+    // Refuse EVERY close we did not ask for. Belt-and-braces with the Alt+F4 key
+    // suppression above: if a close request still reaches the window (a stray
+    // WM_CLOSE, a shell "close window" verb), it is cancelled rather than
+    // leaving the desktop focused — which is what let a student Alt+F4 the lock
+    // and then Alt+F4 again to reach the Shut Down dialog and reboot out of it.
+    "$w.Add_Closing({ param($s,$e) if(-not $script:allowClose){ $e.Cancel=$true } }); " +
     "$w.Add_Loaded({ [IDTLock]::Install(); [void]$w.Activate(); " +
     "  $hh=(New-Object System.Windows.Interop.WindowInteropHelper $w).Handle; " +
     "  $tm=New-Object System.Windows.Threading.DispatcherTimer; $tm.Interval=[TimeSpan]::FromMilliseconds(250); " +
     "  $tm.Add_Tick({ [void][IDTLock]::SetForegroundWindow($hh); $w.Topmost=$true }); $tm.Start(); " +
     "  $fs=New-Object System.Windows.Threading.DispatcherTimer; $fs.Interval=[TimeSpan]::FromMinutes(30); " +
-    "  $fs.Add_Tick({ $fs.Stop(); [IDTLock]::Uninstall(); $w.Close() }); $fs.Start() }); " +
+    "  $fs.Add_Tick({ $fs.Stop(); [IDTLock]::Uninstall(); $script:allowClose=$true; $w.Close() }); $fs.Start() }); " +
     "$w.Add_Closed({ [IDTLock]::Uninstall() }); " +
     "[void]$w.ShowDialog();";
   const ps = "$src = @'\n" + csharp + "\n'@\nAdd-Type -TypeDefinition $src -ErrorAction SilentlyContinue\n" + win;
@@ -844,8 +961,10 @@ function spawnPauseWindow() {
   });
   pauseChild.on("exit", () => {
     pauseChild = null;
-    // student closed it but instructor hasn't resumed — bring it back
-    if (pauseActive) setTimeout(spawnPauseWindow, 400);
+    // The lock went away but the instructor hasn't resumed — bring it back.
+    // Kept short: this gap is the window in which the bare desktop has focus,
+    // and that is precisely where a second Alt+F4 would reach "Shut Down".
+    if (pauseActive) setTimeout(spawnPauseWindow, 120);
   });
 }
 

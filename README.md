@@ -57,8 +57,23 @@ the house is physically laid out — positions are saved per building and shared
 anyone else viewing it. Tap a room's title to drill into that class; tap a computer
 to control it. **Reset layout** re-arranges the rooms into rows.
 
-**Block apps** — one click blocks a game everywhere it's selected; the agent kills
-it now and keeps killing it for a chosen duration (5 min … until you lift it).
+**Block apps** — one click blocks a game everywhere it's selected, for a chosen
+duration (5 min … until you lift it). The **Method** control in the top bar picks
+how a block is enforced:
+
+- **Minimize** *(default)* — the agent keeps shoving the game's window back down.
+  The game stays running but is unusable, and if the student restores it, the next
+  enforcement pass (~2s) minimizes it again.
+- **Force close** — terminates the app outright.
+
+> ⚠️ **Use Minimize for games with anti-cheat (Roblox especially).** Repeatedly
+> force-closing a game client from an outside process looks like tampering to
+> anti-cheat, and student **Roblox accounts were being flagged for cheating/macros
+> and disabled for the rest of the day**. Minimizing only asks the window manager
+> to move a window — it opens no handle on the game process and injects no
+> keystrokes — so it does not trip those checks. Force close remains available for
+> ordinary apps where you genuinely want the process gone.
+
 Built-in presets:
 
 | Preset            | Blocks (apps)                | Blocks (websites)                              |
@@ -90,6 +105,12 @@ are allowed too).
 
 **Pause** — **⏸ Pause** covers every screen with a full-screen "eyes up front"
 overlay that **reopens if a student closes it**, until you press **▶ Resume**.
+While paused the agent suppresses the usual escape routes (Windows key, Alt+Tab,
+Alt+Esc, **Alt+F4**, Alt+Space, Ctrl+Esc, Ctrl+Shift+Esc), refuses any close it
+did not initiate, and **survives a reboot** — a laptop that restarts while paused
+gets the lock straight back when it reconnects (a timed pause resumes with only
+the time still left on it). Ctrl+Alt+Del is a kernel-level sequence and cannot be
+blocked from user mode.
 
 **Message / Lock (one composer)** — the **✉ Message / Lock…** button opens a real
 in-app dialog (no browser pop-ups) that does both jobs: a **Pop-up message** (a
@@ -106,7 +127,11 @@ output (see the security note under the packaged client).
 
 **Scheduled events** — in the Admin panel, schedule daily timed actions (e.g.
 "Pause all computers at 12:00", "Block all games at 1:00, unblock at 1:30") by
-location / building / class / everyone, on chosen days.
+location / building / class / everyone, on chosen days. Two event types take a
+duration: **Pause** (`Pause for (min)` — 0 keeps it up until a Resume) and
+**Full-screen message** (`Show for (sec)` — the message is locked on screen for
+that long and then dismisses itself; 0 shows it as dismissible straight away and
+leaves it until the student clicks OK).
 
 **Find things fast** — every picker (location → building → class) has a
 right-aligned **fuzzy search** (powered by `fuzzysort`): matches float to the front,
@@ -326,10 +351,17 @@ optional `exclude[]` (substrings to spare — e.g. block `roblox` while sparing
 `studio`); `block_site` accepts `domain` or `domains[]`; both accept `duration_sec`
 (omit/0 = until lifted). `pause` accepts `text` and an optional `duration_sec`
 (auto-resume — the agent lifts on its own and the hub also sends a resume).
+`block_app` also accepts `mode`: `"minimize"` (default — keep the app's windows
+minimized via `EnumWindows` + `ShowWindow(SW_FORCEMINIMIZE)`, opening no handle on
+the process) or `"kill"` (force-close). An older hub that sends no `mode` gets the
+safe minimize behaviour automatically.
 `message` accepts `hold_sec` (OK is hidden/locked this long) and `auto_close_sec`
 (self-dismiss). `close_tab` closes the active browser **tab** (Ctrl+W via
-`keybd_event` on the focused window); `minimize_all` toggles show-desktop (Win+D) so
-it minimizes every window and **restores** them on a second press. Both work when
+`keybd_event` on the focused window); `minimize_all` toggles show-desktop through
+the shell's own COM automation (`Shell.Application` `MinimizeAll` /
+`UndoMinimizeALL`) so it minimizes every window and **restores** them on a second
+press — deliberately not injected keystrokes, since injected input is what game
+anti-cheat reads as macro activity. Both work when
 the agent runs elevated — Windows UIPI only blocks low→high input, so a
 High-integrity agent may inject into the normal (Medium) browser, and a hidden
 helper never steals the browser's focus. `start_screenshot`/`stop_screenshot` begin
