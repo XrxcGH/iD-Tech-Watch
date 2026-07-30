@@ -422,6 +422,8 @@ function registerAgent(ws, info) {
     blocked: prev.blocked || [],
     blockedSites: prev.blockedSites || [],
     sitesAvailable: prev.sitesAvailable,
+    // survives a reconnect so rebooting can't shake off a pause (see below)
+    paused: prev.paused || null,
   });
   agentWs.set(deviceId, ws);
   wsDevice.set(ws, deviceId);
@@ -430,7 +432,43 @@ function registerAgent(ws, info) {
   // Re-apply persistent "always block" rules (apps + sites) to the (re)connecting
   // device — building-wide first, then this class's.
   reapplyPersistentToWs(ws, deviceId, buildingId);
+  // ...and put a still-standing pause back up. A student escaped the lock by
+  // rebooting; without this, a restart cleared the pause until an instructor
+  // noticed and re-sent it.
+  reapplyPauseToWs(ws, devices.get(deviceId));
   return deviceId;
+}
+
+// Remember whether a laptop is currently paused, so the state survives the
+// agent dropping off (crash, sleep, or a deliberate reboot). Recorded for every
+// pause/resume we send, whichever scope it was addressed to.
+function notePauseState(ws, action, params) {
+  const id = wsDevice.get(ws);
+  const rec = id && devices.get(id);
+  if (!rec) return;
+  if (action === "resume") {
+    rec.paused = null;
+    return;
+  }
+  const dur = Math.max(0, Math.round(Number((params || {}).duration_sec) || 0));
+  rec.paused = { text: (params || {}).text || "", until: dur > 0 ? Date.now() + dur * 1000 : 0 };
+}
+
+// Re-assert a pause on a reconnecting laptop, carrying over only the time that
+// is actually left on a timed pause (an expired one just clears).
+function reapplyPauseToWs(ws, rec) {
+  const p = rec && rec.paused;
+  if (!p) return;
+  let remain = 0;
+  if (p.until) {
+    remain = Math.round((p.until - Date.now()) / 1000);
+    if (remain <= 0) {
+      rec.paused = null;
+      return;
+    }
+  }
+  ws.sendJSON({ type: "command", action: "pause", params: { text: p.text || "", duration_sec: remain } });
+  console.log(`[hub] re-applied pause to reconnecting ${rec.device_id}${remain ? ` (${remain}s left)` : ""}`);
 }
 
 // Push an org object's persistent always-block rules (apps + sites) down one ws.
@@ -659,6 +697,8 @@ function sendCommand(target, action, params) {
   let sent = 0;
   for (const ws of targetsFor(target)) {
     ws.sendJSON(command);
+    // track pause/resume per device so a reboot can't shed a standing pause
+    if (action === "pause" || action === "resume") notePauseState(ws, action, params);
     sent++;
   }
   return sent;
@@ -765,6 +805,7 @@ function applyOrgOp(op) {
         // re-opened and edited without reverse-engineering the commands).
         typeId: op.typeId || "",
         msgText: op.msgText || "",
+        msgSec: op.msgSec || 0,
         pauseMin: op.pauseMin || 0,
         enabled: op.enabled !== false,
         lastFired: null,
@@ -773,7 +814,7 @@ function applyOrgOp(op) {
     case "updateSchedule": {
       const s = config.schedules.find((x) => x.id === op.id);
       if (s)
-        for (const k of ["name", "time", "days", "targets", "commands", "enabled", "typeId", "msgText", "pauseMin"])
+        for (const k of ["name", "time", "days", "targets", "commands", "enabled", "typeId", "msgText", "msgSec", "pauseMin"])
           if (k in op) s[k] = op[k];
       break;
     }

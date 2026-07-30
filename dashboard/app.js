@@ -168,7 +168,7 @@
   // ------------------------------------------------------------------ state
   const D = { org: [], devices: {}, layouts: {}, schedules: [], instructorCodeRequired: false };
   const nav = { view: "login", locationId: null, buildingId: null, classId: null };
-  const ui = { blockDurationSec: 60, loginRole: "instructor", connected: false, monitorMode: "grid", buildingMode: "list", dragging: null, seatLocked: true, unlocked: {}, expandedProcs: new Set(), classSort: "room", scroll: {}, lastScrollAt: 0, theme: localStorage.getItem("idt_theme") || "dark" };
+  const ui = { blockDurationSec: 60, blockMode: "minimize", loginRole: "instructor", connected: false, monitorMode: "grid", buildingMode: "list", dragging: null, seatLocked: true, unlocked: {}, expandedProcs: new Set(), classSort: "room", scroll: {}, lastScrollAt: 0, theme: localStorage.getItem("idt_theme") || "dark" };
 
   function applyTheme() {
     document.documentElement.dataset.theme = ui.theme;
@@ -484,10 +484,33 @@
     );
   }
 
+  // How an app block is enforced on the laptop. "minimize" keeps shoving the
+  // game's window down (the default); "kill" force-closes it, which is what got
+  // student Roblox accounts flagged for cheating/macros — so it is opt-in.
+  function blockModeControl() {
+    return el(
+      "label",
+      { class: "dur" },
+      "Method ",
+      el(
+        "select",
+        {
+          title: "Minimize keeps pushing the game's window down and is safe for game accounts. Force close terminates it, which some games' anti-cheat treats as tampering.",
+          onchange: (e) => {
+            ui.blockMode = e.target.value;
+            toast(ui.blockMode === "kill" ? "Blocks will FORCE CLOSE apps (may flag game accounts)." : "Blocks will minimize apps (safe for game accounts).");
+          },
+        },
+        el("option", { value: "minimize", selected: ui.blockMode !== "kill" }, "Minimize"),
+        el("option", { value: "kill", selected: ui.blockMode === "kill" }, "Force close")
+      )
+    );
+  }
+
   const robloxPreset = () => BLOCK_PRESETS.find((p) => p.id === "roblox");
   function blockPreset(dispatch, preset) {
     const dur = ui.blockDurationSec;
-    if (preset.apps && preset.apps.length) dispatch("block_app", { patterns: preset.apps, exclude: preset.exclude || [], duration_sec: dur });
+    if (preset.apps && preset.apps.length) dispatch("block_app", { patterns: preset.apps, exclude: preset.exclude || [], duration_sec: dur, mode: ui.blockMode });
     if (preset.sites && preset.sites.length) dispatch("block_site", { domains: preset.sites, duration_sec: dur });
     if (preset.closeTabs) dispatch("close_tab", {}); // close the open tab so the block bites now
     toast(`Blocking ${preset.label}${preset.closeTabs ? " (+ closing the open tab)" : ""}.`);
@@ -496,7 +519,7 @@
     const apps = [...new Set(BLOCK_PRESETS.flatMap((p) => p.apps))];
     const sites = [...new Set(BLOCK_PRESETS.flatMap((p) => p.sites))];
     const exclude = [...new Set(BLOCK_PRESETS.flatMap((p) => p.exclude || []))];
-    dispatch("block_app", { patterns: apps, exclude, duration_sec: ui.blockDurationSec });
+    dispatch("block_app", { patterns: apps, exclude, duration_sec: ui.blockDurationSec, mode: ui.blockMode });
     dispatch("block_site", { domains: sites, duration_sec: ui.blockDurationSec });
     dispatch("close_tab", {});
     toast("Blocking all games + gaming sites.");
@@ -563,7 +586,7 @@
 
     const customApp = () =>
       modalPrompt({ title: "Block an app", label: "Block which app?", placeholder: "name or part of it, e.g. steam", okText: "Block" }).then((n) => {
-        if (n && n.trim()) dispatch("block_app", { pattern: n.trim(), duration_sec: ui.blockDurationSec });
+        if (n && n.trim()) dispatch("block_app", { pattern: n.trim(), duration_sec: ui.blockDurationSec, mode: ui.blockMode });
       });
     const customSite = () =>
       modalPrompt({ title: "Block a website", label: "Block which website?", placeholder: "e.g. poki.com", okText: "Block" }).then((n) => {
@@ -778,8 +801,9 @@
     } else {
       right.append(el("button", { class: "navlink", onclick: () => location.assign("/demo") }, "Demo"));
     }
-    // global "Block for" duration (applies to every block action), monitor only
-    if (nav.view === "monitor") right.append(durationControl());
+    // global "Block for" duration + how blocks are enforced (applies to every
+    // block action), monitor only
+    if (nav.view === "monitor") right.append(durationControl(), blockModeControl());
     right.append(
       el("span", { class: "role-badge " + auth.role }, auth.role === "admin" ? "Admin" : "Instructor"),
       connDot(),
@@ -1828,7 +1852,10 @@
     { id: "close_tab", label: "Close current tab", build: () => [{ action: "close_tab" }] },
     { id: "close_browsers", label: "Close all browsers", build: () => [{ action: "close_browsers" }] },
     { id: "unblock", label: "Unblock everything", build: () => [{ action: "unblock_all" }] },
-    { id: "message", label: "Full-screen message (10s hold)", usesMsg: true, build: (o) => [{ action: "message", params: { text: o.text || "", hold_sec: 10 } }] },
+    // The duration is how long the message stays up AND stays locked: the OK
+    // button is hidden for that long, then it dismisses itself. 0 = show it
+    // straight away as dismissible and leave it until the student clicks OK.
+    { id: "message", label: "Full-screen message (timed)", usesMsg: true, usesMsgSec: true, build: (o) => [{ action: "message", params: { text: o.text || "", hold_sec: o.msgSec, auto_close_sec: o.msgSec } }] },
   ];
   const ACTION_LABEL = { pause: "Pause", resume: "Resume", block_app: "Block apps", block_site: "Block sites", unblock_all: "Unblock", close_browsers: "Close browsers", close_tab: "Close tab", minimize_all: "Minimize", message: "Message", kill_process: "Close app" };
 
@@ -1918,11 +1945,18 @@
   // Recover the event type + inputs from a stored schedule (uses the saved
   // metadata when present; otherwise infers from the commands for old events).
   function scheduleTypeOf(s) {
-    if (s.typeId) return { typeId: s.typeId, msgText: s.msgText || "", pauseMin: s.pauseMin || 0 };
+    // msgSec defaults to 10 for events saved before the duration was editable —
+    // that is exactly what those events were built with.
+    if (s.typeId) return { typeId: s.typeId, msgText: s.msgText || "", msgSec: s.msgSec != null ? s.msgSec : 10, pauseMin: s.pauseMin || 0 };
     const cmds = s.commands || [];
     const actions = cmds.map((c) => c.action);
-    let typeId = "pause", msgText = "", pauseMin = 0;
-    if (actions.includes("message")) { typeId = "message"; const m = cmds.find((c) => c.action === "message"); msgText = (m && m.params && m.params.text) || ""; }
+    let typeId = "pause", msgText = "", msgSec = 10, pauseMin = 0;
+    if (actions.includes("message")) {
+      typeId = "message";
+      const m = cmds.find((c) => c.action === "message");
+      msgText = (m && m.params && m.params.text) || "";
+      if (m && m.params && m.params.hold_sec != null) msgSec = Math.max(0, Math.round(Number(m.params.hold_sec) || 0));
+    }
     else if (actions.includes("resume")) typeId = "resume";
     else if (actions.includes("pause")) { typeId = "pause"; const p = cmds.find((c) => c.action === "pause"); pauseMin = p && p.params && p.params.duration_sec ? Math.round(p.params.duration_sec / 60) : 0; }
     else if (actions.includes("unblock_all")) typeId = "unblock";
@@ -1930,7 +1964,7 @@
     else if (actions.includes("close_tab")) typeId = "close_tab";
     else if (actions.includes("close_browsers")) typeId = "close_browsers";
     else if (actions.includes("block_app")) { const ba = cmds.find((c) => c.action === "block_app"); typeId = (ba && ba.params && (ba.params.patterns || []).length > 1) ? "block_all" : "block_roblox"; }
-    return { typeId, msgText, pauseMin };
+    return { typeId, msgText, msgSec, pauseMin };
   }
 
   function adminSchedules() {
@@ -1996,19 +2030,26 @@
     const pauseField = fieldInline("Pause for (min)", pauseMinI);
     const msgI = el("input", { placeholder: "Message text", value: et0.msgText || "" });
     const msgField = fieldInline("Message", msgI);
+    const msgSecI = el("input", { type: "number", min: "0", step: "1", value: String(et0.msgSec != null ? et0.msgSec : 10), placeholder: "0 = until dismissed" });
+    const msgSecField = fieldInline("Show for (sec)", msgSecI);
     const typeSel = el("select", {
       onchange: () => {
         const et = EVENT_TYPES.find((t) => t.id === typeSel.value);
         pauseField.style.display = et && et.usesPause ? "" : "none";
         msgField.style.display = et && et.usesMsg ? "" : "none";
+        msgSecField.style.display = et && et.usesMsgSec ? "" : "none";
       },
     }, ...EVENT_TYPES.map((t) => el("option", { value: t.id, selected: t.id === et0.typeId }, t.label)));
     const submit = () => {
       const targets = targetPicker.getTargets();
       if (!targets.length) return toast("Tick at least one class, building, or campus.");
       const et = EVENT_TYPES.find((t) => t.id === typeSel.value) || EVENT_TYPES[0];
-      const opts = { text: msgI.value.trim(), pauseMin: Math.max(0, parseInt(pauseMinI.value, 10) || 0) };
-      const payload = { name: nameI.value.trim() || "Event", time: timeI.value || "12:00", days: dayState.slice(), targets, commands: et.build(opts), typeId: et.id, msgText: opts.text, pauseMin: opts.pauseMin };
+      const opts = {
+        text: msgI.value.trim(),
+        msgSec: Math.max(0, parseInt(msgSecI.value, 10) || 0),
+        pauseMin: Math.max(0, parseInt(pauseMinI.value, 10) || 0),
+      };
+      const payload = { name: nameI.value.trim() || "Event", time: timeI.value || "12:00", days: dayState.slice(), targets, commands: et.build(opts), typeId: et.id, msgText: opts.text, msgSec: opts.msgSec, pauseMin: opts.pauseMin };
       if (editing) {
         org(Object.assign({ op: "updateSchedule", id: editing.id }, payload));
         ui.editingSchedule = null;
@@ -2032,7 +2073,7 @@
         editing ? el("div", { class: "sched-editing-note" }, `Editing “${editing.name}” — change any field and Save.`) : null,
         el("div", { class: "sched-row" }, fieldInline("Name", nameI), fieldInline("Time", timeI)),
         el("div", { class: "sched-row" }, fieldInline("Days (none = every day)", dayBtns)),
-        el("div", { class: "sched-row" }, fieldInline("Event", typeSel), pauseField, msgField),
+        el("div", { class: "sched-row" }, fieldInline("Event", typeSel), pauseField, msgField, msgSecField),
         el("div", { class: "sched-row" }, fieldInline("Applies to (tick any campuses / buildings / classes)", targetPicker.node)),
         el("div", { class: "sched-row" }, submitBtn, cancelBtn)
       )
@@ -2042,6 +2083,7 @@
       const et = EVENT_TYPES.find((t) => t.id === typeSel.value);
       pauseField.style.display = et && et.usesPause ? "" : "none";
       msgField.style.display = et && et.usesMsg ? "" : "none";
+      msgSecField.style.display = et && et.usesMsgSec ? "" : "none";
     })();
 
     return section("Scheduled events (daily)", body, el("span", { class: "muted small" }, "Runs on the hub clock"));
