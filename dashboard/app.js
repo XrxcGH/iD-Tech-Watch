@@ -2377,10 +2377,10 @@
             {
               class: "btn ghost sm" + (stale ? " primary" : ""),
               disabled: !d.online,
-              title: !d.online ? "Computer is offline" : "Push the latest software and restart this computer (its name/server settings are kept)",
+              title: !d.online ? "Computer is offline" : "Push the latest software. The app restarts itself — the computer does NOT need restarting, and its name/server settings are kept.",
               onclick: () =>
                 d.online &&
-                modalConfirm(`Update “${nameOf(d)}” to the latest software and restart it now? Its settings (name, server, building) are kept.`, { title: "Update computer", okText: "Update & restart" }).then((ok) => {
+                modalConfirm(`Update “${nameOf(d)}” to the latest software now?\n\nThe iD Tech Watch app closes and reopens itself within a few seconds. The computer is NOT restarted and the student doesn't have to do anything. Its settings (name, server, building) are kept.`, { title: "Update computer", okText: "Update now" }).then((ok) => {
                   if (ok) {
                     updateAgent({ scope: "device", deviceId: d.device_id });
                     toast(`Pushing update to ${nameOf(d)}…`);
@@ -2430,9 +2430,9 @@
       "button",
       {
         class: "btn sm" + (staleRemote ? " primary" : ""),
-        title: "Push the latest software to every online computer that supports remote update, and restart them (settings kept)",
+        title: "Push the latest software to every online computer that supports remote update. Each app restarts itself — no computer restarts, settings kept.",
         onclick: () =>
-          modalConfirm("Push the latest software to ALL online computers and restart them now? Each keeps its own settings (name, server, building). Older laptops that need a one-time manual install are skipped automatically.", { title: "Update all computers", okText: "Update all" }).then((ok) => {
+          modalConfirm("Push the latest software to ALL online computers now?\n\nEach laptop's iD Tech Watch app closes and reopens itself within a few seconds — the computers are NOT restarted and students don't have to do anything. Each keeps its own settings (name, server, building). Older laptops that need a one-time manual install are skipped automatically.", { title: "Update all computers", okText: "Update all" }).then((ok) => {
             if (ok) {
               updateAgent({ scope: "all" });
               toast("Pushing update to all online computers…");

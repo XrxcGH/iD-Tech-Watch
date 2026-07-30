@@ -154,6 +154,7 @@ function loadConfig() {
     config.schedules ||= [];
     config.deviceNames ||= {};
     config.auth ||= {};
+    config.deviceState ||= {}; // deviceId -> { blocks, paused }: survives a hub restart
     delete config.auth.instructorCode; // retired: buildings use 4-digit codes now
     migrateSchedules();
   } catch (_) {
@@ -171,9 +172,11 @@ function loadConfig() {
       layouts: {},
       schedules: [],
       deviceNames: {},
+      deviceState: {},
       auth: {},
     };
   }
+  config.deviceState ||= {}; // belt-and-braces: never let a lookup hit undefined
 
   // bootstrap admin password if not set (env var, else a loud default)
   if (!config.auth.adminHash) {
@@ -454,8 +457,10 @@ function registerAgent(ws, info) {
     // what is currently in force. `blocks` mirrors the ad-hoc/timed blocks the
     // agent was told to apply (persistent class/building rules live in config
     // and are re-applied separately); `paused` is the standing lock.
-    blocks: prev.blocks || { apps: {}, sites: {} },
-    paused: prev.paused || null,
+    // ...and seeded from disk when the HUB itself was restarted, so a hub
+    // restart doesn't silently drop every block and pause in the building.
+    blocks: prev.blocks || ((config.deviceState || {})[deviceId] || {}).blocks || { apps: {}, sites: {} },
+    paused: prev.paused || ((config.deviceState || {})[deviceId] || {}).paused || null,
   });
   agentWs.set(deviceId, ws);
   wsDevice.set(ws, deviceId);
@@ -553,6 +558,7 @@ function noteBlockState(target, action, params) {
     } else if (action === "unblock_site") {
       for (const d of doms) delete B.sites[String(d || "").trim().toLowerCase()];
     }
+    persistDeviceState(deviceId);
   }
 }
 
@@ -569,6 +575,7 @@ function notePauseState(target, action, params) {
     if (!rec) continue;
     if (action === "resume") {
       rec.paused = null;
+      persistDeviceState(deviceId);
       continue;
     }
     const dur = Math.max(0, Math.round(Number((params || {}).duration_sec) || 0));
@@ -577,6 +584,7 @@ function notePauseState(target, action, params) {
       until: dur > 0 ? Date.now() + dur * 1000 : 0,
       at: Date.now(), // so a forgotten pause can't come back days later
     };
+    persistDeviceState(deviceId);
   }
 }
 
@@ -829,6 +837,22 @@ function targetsFor(target) {
       out.push(ws);
   }
   return out;
+}
+
+// Mirror a device's live block/pause state to disk so it also survives the HUB
+// restarting, not just the laptop. Debounced: instructor actions are bursty
+// (a preset fires several commands at once) and this is a whole-config write.
+let stateSaveTimer = null;
+function persistDeviceState(deviceId) {
+  const rec = devices.get(deviceId);
+  if (!rec) return;
+  config.deviceState = config.deviceState || {};
+  config.deviceState[deviceId] = { blocks: rec.blocks || { apps: {}, sites: {} }, paused: rec.paused || null };
+  if (stateSaveTimer) return;
+  stateSaveTimer = setTimeout(() => {
+    stateSaveTimer = null;
+    saveConfig();
+  }, 1000);
 }
 
 // Device ids matching a target, whether or not the laptop is connected right
