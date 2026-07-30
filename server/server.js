@@ -118,6 +118,33 @@ let config = {
   auth: {}, // { adminHash, adminSalt, instructorCode }
 };
 
+// A schedule's commands are frozen at save time, so "Block all games" events
+// saved before Minecraft was pulled out of that set still carry it and would
+// keep blocking a class that uses Minecraft to teach — while the editor now
+// says the event excludes it. Drop Minecraft from those saved events so stored
+// behaviour matches what the UI promises. Only touches block_all events.
+function migrateSchedules() {
+  let changed = 0;
+  for (const s of config.schedules || []) {
+    if (s.typeId !== "block_all") continue;
+    for (const c of s.commands || []) {
+      const p = c.params || {};
+      if (c.action === "block_app" && Array.isArray(p.patterns)) {
+        const kept = p.patterns.filter((x) => !String(x).toLowerCase().includes("minecraft"));
+        if (kept.length !== p.patterns.length) (p.patterns = kept), changed++;
+      }
+      if (c.action === "block_site" && Array.isArray(p.domains)) {
+        const kept = p.domains.filter((x) => !String(x).toLowerCase().includes("minecraft"));
+        if (kept.length !== p.domains.length) (p.domains = kept), changed++;
+      }
+    }
+  }
+  if (changed) {
+    console.log(`[hub] migrated ${changed} saved "block all games" rule(s) to exclude Minecraft`);
+    saveConfig();
+  }
+}
+
 function loadConfig() {
   try {
     config = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
@@ -128,6 +155,7 @@ function loadConfig() {
     config.deviceNames ||= {};
     config.auth ||= {};
     delete config.auth.instructorCode; // retired: buildings use 4-digit codes now
+    migrateSchedules();
   } catch (_) {
     // first run — seed the Stanford beta campus with its buildings
     const seedBuildings = ["Tresidder", "Grove", "Phi Psi", "French", "Warehaus"].map((n) => ({
@@ -442,23 +470,39 @@ function registerAgent(ws, info) {
 // Remember whether a laptop is currently paused, so the state survives the
 // agent dropping off (crash, sleep, or a deliberate reboot). Recorded for every
 // pause/resume we send, whichever scope it was addressed to.
-function notePauseState(ws, action, params) {
-  const id = wsDevice.get(ws);
-  const rec = id && devices.get(id);
-  if (!rec) return;
-  if (action === "resume") {
-    rec.paused = null;
-    return;
+// Applied to every device the command was ADDRESSED to, connected or not.
+// Keying this off live sockets was wrong: a laptop that is rebooting when the
+// instructor presses Resume would never have its record cleared, and would then
+// re-lock itself on reconnect — with an untimed pause, indefinitely.
+function notePauseState(target, action, params) {
+  for (const deviceId of deviceIdsFor(target)) {
+    const rec = devices.get(deviceId);
+    if (!rec) continue;
+    if (action === "resume") {
+      rec.paused = null;
+      continue;
+    }
+    const dur = Math.max(0, Math.round(Number((params || {}).duration_sec) || 0));
+    rec.paused = {
+      text: (params || {}).text || "",
+      until: dur > 0 ? Date.now() + dur * 1000 : 0,
+      at: Date.now(), // so a forgotten pause can't come back days later
+    };
   }
-  const dur = Math.max(0, Math.round(Number((params || {}).duration_sec) || 0));
-  rec.paused = { text: (params || {}).text || "", until: dur > 0 ? Date.now() + dur * 1000 : 0 };
 }
 
 // Re-assert a pause on a reconnecting laptop, carrying over only the time that
 // is actually left on a timed pause (an expired one just clears).
+const PAUSE_MAX_AGE_MS = 12 * 60 * 60 * 1000; // don't resurrect yesterday's pause
 function reapplyPauseToWs(ws, rec) {
   const p = rec && rec.paused;
   if (!p) return;
+  // A laptop that was shut down before an instructor resumed shouldn't boot up
+  // locked the next morning. An untimed pause has no natural expiry, so age it.
+  if (p.at && Date.now() - p.at > PAUSE_MAX_AGE_MS) {
+    rec.paused = null;
+    return;
+  }
   let remain = 0;
   if (p.until) {
     remain = Math.round((p.until - Date.now()) / 1000);
@@ -692,13 +736,31 @@ function targetsFor(target) {
   return out;
 }
 
+// Device ids matching a target, whether or not the laptop is connected right
+// now (targetsFor only yields live sockets).
+function deviceIdsFor(target) {
+  const scope = (target && target.scope) || "device";
+  const out = [];
+  for (const [deviceId, rec] of devices) {
+    if (!rec) continue;
+    if (scope === "all") out.push(deviceId);
+    else if (scope === "device" && deviceId === target.deviceId) out.push(deviceId);
+    else if (scope === "location" && rec.locationId === target.locationId) out.push(deviceId);
+    else if (scope === "building" && rec.buildingId === target.buildingId) out.push(deviceId);
+    else if (scope === "class" && deviceClassId(deviceId, rec.buildingId) === target.classId) out.push(deviceId);
+  }
+  return out;
+}
+
 function sendCommand(target, action, params) {
   const command = { type: "command", action, params: params || {} };
+  // Record pause intent against every addressed device (including ones that are
+  // currently offline) so a reboot can't shed a standing pause, and a Resume
+  // sent while a laptop is down still releases it.
+  if (action === "pause" || action === "resume") notePauseState(target, action, params);
   let sent = 0;
   for (const ws of targetsFor(target)) {
     ws.sendJSON(command);
-    // track pause/resume per device so a reboot can't shed a standing pause
-    if (action === "pause" || action === "resume") notePauseState(ws, action, params);
     sent++;
   }
   return sent;

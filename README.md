@@ -79,12 +79,32 @@ Built-in presets:
 | Preset            | Blocks (apps)                | Blocks (websites)                              |
 |-------------------|------------------------------|------------------------------------------------|
 | Roblox (Player)   | `*roblox*` **except** `*studio*` | roblox.com                                  |
-| Minecraft         | `*minecraft*`                | minecraft.net                                  |
+| Minecraft †       | `*minecraft*`, **plus** `*javaw*`/`*java*` whose **command line** contains `minecraft` | minecraft.net, classic.minecraft.net |
 | Fortnite          | `*fortnite*`                 | —                                              |
 | Steam             | `*steam*`                    | steampowered.com, steamcommunity.com           |
 | Epic Games        | `*epicgames*`, `*fortnite*`  | epicgames.com                                  |
 | Gaming websites   | —                            | poki.com, coolmathgames.com, crazygames.com, miniclip.com, y8.com, addictinggames.com, kongregate.com, armorgames.com, friv.com, gamejolt.com |
-| All games + sites | everything above             | everything above                               |
+| All games + sites | everything above **except Minecraft** | everything above **except Minecraft**  |
+
+† **Minecraft is handled specially, in two ways.**
+*Blocking the running game:* Java Edition does not run as `minecraft.exe` — the
+launcher does, but the game itself is **`javaw.exe`**, which is why a plain name
+block could stop the launcher and the website but never a student already in a
+world. The preset adds a second block that matches `javaw`/`java` **only when the
+process command line mentions minecraft**, so the game is caught while BlueJ,
+Processing, IntelliJ and any Java coursework on the same laptop are left alone.
+*Not in "all games":* Minecraft is taught in some classes, so it is deliberately
+left out of **Block all games + sites** (and out of the "Block all games"
+scheduled event). Block it explicitly — from the Block menu or with the **Block
+Minecraft** scheduled event — for the periods a class shouldn't be playing.
+(Saved "Block all games" events from before this change are migrated on hub
+start, so they stop blocking Minecraft too.)
+
+> **Caveat:** the match is a plain substring on the command line, so a Java
+> program that legitimately *mentions* minecraft — a student's `MinecraftClone`
+> project run from BlueJ, or Forge/mod-development tooling — will also be caught.
+> In a class that codes Minecraft-adjacent Java, block the launcher by name only
+> (**Custom app…** → `minecraft`) rather than using the preset.
 
 Plus **Custom app…** (any process-name substring, e.g. `discord`) and **Custom
 website…** (any domain, e.g. `twitch.tv`). Also **Close app…** (kill once) and
@@ -101,7 +121,11 @@ that closes every browser window immediately, clearing an already-open site.
 stay blocked for that class permanently (persists across restarts, re-applied when
 a laptop reconnects). The add box **autocompletes from the apps currently open**
 across the class (type or pick; Tab fills the top match and adds it; unknown names
-are allowed too).
+are allowed too). This is the right place for "this class never plays Minecraft":
+an entry may use the form **`name (command-line text)`** — e.g. `javaw (minecraft)`
+— to match a host process only when its command line contains that text, so the
+Java game is blocked but other Java programs are not. It is the same form shown on
+the block chips, so a chip can be handed straight back to unblock it.
 
 **Pause** — **⏸ Pause** covers every screen with a full-screen "eyes up front"
 overlay that **reopens if a student closes it**, until you press **▶ Resume**.
@@ -354,7 +378,11 @@ optional `exclude[]` (substrings to spare — e.g. block `roblox` while sparing
 `block_app` also accepts `mode`: `"minimize"` (default — keep the app's windows
 minimized via `EnumWindows` + `ShowWindow(SW_FORCEMINIMIZE)`, opening no handle on
 the process) or `"kill"` (force-close). An older hub that sends no `mode` gets the
-safe minimize behaviour automatically.
+safe minimize behaviour automatically. It also accepts `cmd_match`, a substring
+that must appear in the process's **command line** for the block to apply — this
+is how `javaw.exe` is blocked when (and only when) it is running Minecraft.
+Command lines are read with `Get-CimInstance Win32_Process`, which is slower than
+`Get-Process`, so that path is only taken when a block actually asks for it.
 `message` accepts `hold_sec` (OK is hidden/locked this long) and `auto_close_sec`
 (self-dismiss). `close_tab` closes the active browser **tab** (Ctrl+W via
 `keybd_event` on the focused window); `minimize_all` toggles show-desktop through
