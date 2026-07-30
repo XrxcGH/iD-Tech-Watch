@@ -49,7 +49,7 @@ const IS_MAC = process.platform === "darwin";
 
 // Build stamp — logged on startup so you can confirm which agent version a
 // laptop is actually running (see watch-client.log in the install folder).
-const BUILD = "2026-07-29 minimize-blocks · alt-f4-lock · timed-message";
+const BUILD = "2026-07-30 minimize-blocks · alt-f4-lock · cmdline-blocks";
 
 const ENFORCE_INTERVAL_MS = 2000; // how often to sweep the blocklists
 const STATUS_INTERVAL_DEFAULT = 4; // seconds between status reports
@@ -190,29 +190,81 @@ function safePat(s) {
   return String(s || "").toLowerCase().trim().replace(/[^a-z0-9 ._-]/gi, "");
 }
 
-// Terminate every process whose name contains `pattern` (case-insensitive).
-async function killMatching(pattern) {
-  return killMatchingMany([{ pat: pattern, exclude: [] }]);
+// A pattern may carry its own command-line requirement inline as "name (cmd)" —
+// the same form shown on a dashboard block chip, so a chip can be handed
+// straight back, and the form the per-class "always block" list (plain strings,
+// no cmd_match field) uses to express "javaw (minecraft)".
+function parsePattern(raw, fallbackCmd) {
+  const m = /^(.+?)\s*\(([^()]+)\)$/.exec(String(raw || "").trim());
+  return m ? { pat: m[1].trim(), cmd: m[2].trim() } : { pat: raw, cmd: fallbackCmd || "" };
 }
 
-// Build the process-name match clauses shared by the kill and minimize sweeps.
-// Each block = { pat, exclude:[substrings] } — `exclude` lets a block match a
-// family but spare a sibling (block Roblox Player, keep Roblox Studio).
+// Terminate every process whose name contains `pattern` (case-insensitive).
+async function killMatching(pattern) {
+  const e = parsePattern(pattern, "");
+  return killMatchingMany([{ pat: e.pat, exclude: [], cmd: e.cmd }]);
+}
+
+// Build the match clauses shared by the kill and minimize sweeps.
+// Each block = { pat, exclude:[substrings], cmd }:
+//   pat     — substring of the process name
+//   exclude — spare a sibling that also matches (block Roblox Player, keep Studio)
+//   cmd     — ALSO require this substring in the process's command line
+//
+// `cmd` is what makes Minecraft Java blockable. The running game is not
+// "minecraft.exe", it is javaw.exe — and blocking every javaw would take out
+// BlueJ, Processing, IntelliJ and any Java coursework with it. Matching
+// javaw + a command line containing "minecraft" hits the game and nothing else.
 function matchClauses(blocks) {
   const clauses = [];
   const pats = [];
+  let needsCmd = false;
   for (const b of blocks || []) {
     const pat = safePat(b && b.pat);
     if (!pat) continue;
     pats.push(pat);
     let clause = `$n -like '*${pat}*'`;
+    const cmd = safePat(b && b.cmd);
+    if (cmd) {
+      clause += ` -and $c -like '*${cmd}*'`;
+      needsCmd = true;
+    }
     for (const e of (b.exclude || [])) {
       const ex = safePat(e);
       if (ex) clause += ` -and $n -notlike '*${ex}*'`;
     }
     clauses.push(`(${clause})`);
   }
-  return { clauses, pats };
+  return { clauses, pats, needsCmd };
+}
+
+// PowerShell that leaves the matching process ids in $ids.
+// Command lines only come from Win32_Process (a WMI call, noticeably slower than
+// Get-Process), so we only pay for it when a block actually asks for one — the
+// ordinary name-only sweep, which runs every couple of seconds, stays on the
+// fast path. `[string]$_.CommandLine` keeps a null command line as "" so it
+// simply fails to match instead of throwing.
+// Marker carried in every sweep's own command line. A command-line sweep would
+// otherwise MATCH ITSELF: our query text literally contains the pattern we are
+// searching for (`-like '*minecraft*'`), so the agent's own helper PowerShells
+// looked like Minecraft and got swept. Every sweep sets this variable, and the
+// command-line query skips marked processes.
+//
+// The skip is deliberately narrowed to PowerShell processes: excluding *any*
+// process whose command line mentions the marker would hand students an opt-out
+// — Minecraft's launcher lets you edit the JVM arguments, so `-DIDT_SWEEP`
+// would make the game invisible to the block. Only powershell.exe can plausibly
+// be one of our sweeps.
+const SWEEP_MARK = "$IDT_SWEEP=1; ";
+function selectIdsPs(clauses, needsCmd) {
+  const where = clauses.join(" -or ");
+  if (needsCmd) {
+    return (
+      SWEEP_MARK +
+      `$ids = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $n=$_.Name; $c=[string]$_.CommandLine; (-not ($n -like 'powershell*' -and $c -like '*IDT_SWEEP*')) -and (${where}) } | ForEach-Object { [uint32]$_.ProcessId }); `
+    );
+  }
+  return SWEEP_MARK + `$ids = @(Get-Process | Where-Object { $n=$_.ProcessName; $c=''; ${where} } | ForEach-Object { [uint32]$_.Id }); `;
 }
 
 // Terminate every process matching ANY of `blocks` in a SINGLE PowerShell call.
@@ -224,7 +276,7 @@ function matchClauses(blocks) {
 // NOTE: this is no longer the default for app blocks — see minimizeMatchingMany.
 // Force-terminating a game client is what got student Roblox accounts flagged.
 async function killMatchingMany(blocks) {
-  const { clauses, pats: macos } = matchClauses(blocks);
+  const { clauses, pats: macos, needsCmd } = matchClauses(blocks);
   if (!clauses.length) return [];
   const killed = [];
   if (IS_WIN) {
@@ -232,9 +284,10 @@ async function killMatchingMany(blocks) {
       "-NoProfile",
       "-NonInteractive",
       "-Command",
-      `$p = Get-Process | Where-Object { $n=$_.ProcessName; ${clauses.join(" -or ")} }; ` +
-        `$p | ForEach-Object { $_.ProcessName }; ` +
-        `$p | Stop-Process -Force -ErrorAction SilentlyContinue`,
+      selectIdsPs(clauses, needsCmd) +
+        `if ($ids.Count -gt 0) { ` +
+        `Get-Process -Id $ids -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName }; ` +
+        `Stop-Process -Id $ids -Force -ErrorAction SilentlyContinue }`,
     ]);
     for (const line of out.split(/\r?\n/)) {
       const n = line.trim();
@@ -300,19 +353,30 @@ const MIN_CSHARP = [
 // Already-minimized windows are skipped, so a steady state costs nothing and
 // never steals focus.
 async function minimizeMatchingMany(blocks) {
-  const { clauses } = matchClauses(blocks);
+  const { clauses, needsCmd } = matchClauses(blocks);
   if (!clauses.length) return 0;
   // No window-manager equivalent off Windows; fall back to the old behaviour
   // there rather than silently doing nothing (camp laptops are all Windows).
   if (!IS_WIN) return (await killMatchingMany(blocks)).length;
+  // Find the processes FIRST and only compile the C# if something matched.
+  // Add-Type spawns csc.exe (~0.8-1s); in the steady state — a block active but
+  // the game not running — this sweep now costs one Get-Process and nothing
+  // else, instead of recompiling every 2s all day on a student laptop.
   const ps =
-    "$src = @'\n" + MIN_CSHARP + "\n'@\n" +
+    selectIdsPs(clauses, needsCmd) +
+    "\nif ($ids.Count -gt 0) {\n$src = @'\n" + MIN_CSHARP + "\n'@\n" +
     "Add-Type -TypeDefinition $src -ErrorAction SilentlyContinue\n" +
-    `$ids = @(Get-Process | Where-Object { $n=$_.ProcessName; ${clauses.join(" -or ")} } | ForEach-Object { [uint32]$_.Id }); ` +
-    "if ($ids.Count -gt 0) { [IDTWin]::Minimize($ids) } else { 0 }";
+    "[IDTWin]::Minimize($ids)\n} else { 0 }";
   const out = await run("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps]);
   const m = /(\d+)\s*$/.exec(String(out).trim());
-  return m ? parseInt(m[1], 10) : 0;
+  if (!m) {
+    // No count came back: the 6s timeout hit, or Add-Type was blocked (AV,
+    // Constrained Language Mode). Say so — otherwise the dashboard shows the
+    // block as active while the laptop silently enforces nothing.
+    log("WARNING: minimize sweep returned no result — blocks may not be enforced on this laptop.");
+    return 0;
+  }
+  return parseInt(m[1], 10);
 }
 
 // Full-screen instructor message.
@@ -479,8 +543,9 @@ async function enforce() {
     // still one batched sweep, so at most two PowerShell spawns per pass.
     const minBlocks = [];
     const killBlocks = [];
-    for (const [pat, meta] of activeAppBlocks()) {
-      const b = { pat, exclude: (meta && meta.exclude) || [] };
+    for (const [key, meta] of activeAppBlocks()) {
+      // meta.pat is the real process-name pattern; `key` is its display form
+      const b = { pat: (meta && meta.pat) || key, exclude: (meta && meta.exclude) || [], cmd: (meta && meta.cmd) || "" };
       if (meta && meta.mode === "kill") killBlocks.push(b);
       else minBlocks.push(b);
     }
@@ -534,6 +599,12 @@ function collectExcludes(p) {
   if (Array.isArray(p.excludes)) for (const x of p.excludes) arr.push(String(x).toLowerCase().trim());
   return [...new Set(arr.filter(Boolean))];
 }
+// Optional command-line requirement for a block — lets a block target a generic
+// host process only when it is running the thing we care about (javaw running
+// Minecraft, say, rather than every Java program on the laptop).
+function collectCmd(p) {
+  return String(p.cmd_match || p.cmdMatch || "").toLowerCase().trim();
+}
 
 async function handleCommand(ws, msg) {
   const action = msg.action;
@@ -549,16 +620,36 @@ async function handleCommand(ws, msg) {
     // Default to minimizing. Only an explicit mode:"kill" force-closes, so an
     // older hub (which sends no mode) gets the safe behaviour automatically.
     const mode = String(p.mode || "").toLowerCase() === "kill" ? "kill" : "minimize";
-    for (const pat of pats) appBlocks.set(pat, { expiry, exclude, mode });
+    const cmdAll = collectCmd(p);
+    // A pattern may carry its own command-line requirement inline as
+    // "name (cmd)" — the same form the dashboard shows on a block chip. That
+    // makes the round trip work (a chip can be handed straight back to unblock)
+    // and lets the per-class "always block" list, which stores plain strings and
+    // has no cmd_match field, still express "javaw (minecraft)".
+    const entries = pats.map((raw) => {
+      const m = /^(.+?)\s*\(([^()]+)\)$/.exec(raw);
+      return m ? { pat: m[1].trim(), cmd: m[2].trim() } : { pat: raw, cmd: cmdAll };
+    });
+    // Keyed by its display form so a command-line block is distinct from a plain
+    // name block, and so the chip the dashboard shows is exactly the key an
+    // unblock comes back with.
+    for (const e of entries) appBlocks.set(e.cmd ? `${e.pat} (${e.cmd})` : e.pat, { expiry, exclude, mode, cmd: e.cmd, pat: e.pat });
     // one batched sweep now (not one PowerShell per pattern) so the first hit is snappy
     if (pats.length) {
-      const blocks = pats.map((pat) => ({ pat, exclude }));
+      const blocks = entries.map((e) => ({ pat: e.pat, exclude, cmd: e.cmd }));
       if (mode === "kill") await killMatchingMany(blocks);
       else await minimizeMatchingMany(blocks);
       log(`blocking apps (${mode}): ${pats.join(", ")}${exclude.length ? ` (except ${exclude.join(", ")})` : ""} (${p.duration_sec ? p.duration_sec + "s" : "until lifted"})`);
     }
   } else if (action === "unblock_app") {
-    for (const pat of collectPatterns(p)) appBlocks.delete(pat);
+    // Accept either the display key the dashboard shows ("javaw (minecraft)") or
+    // the bare process pattern ("javaw"), so unblocking works from either side.
+    for (const pat of collectPatterns(p)) {
+      appBlocks.delete(pat);
+      for (const [key, meta] of [...appBlocks]) {
+        if (key.startsWith(`${pat} (`) || (meta && meta.pat === pat)) appBlocks.delete(key);
+      }
+    }
   } else if (action === "block_site") {
     const doms = collectDomains(p);
     for (const d of doms) siteBlocks.set(d, expiry);
@@ -576,7 +667,7 @@ async function handleCommand(ws, msg) {
   } else if (action === "close_tab") {
     closeCurrentTab();
   } else if (action === "minimize_all") {
-    minimizeAll();
+    minimizeAll(p.direction);
   } else if (action === "send_keys") {
     sendKeys(p.keys != null ? p.keys : p.combo);
   } else if (action === "run_command") {
@@ -660,11 +751,19 @@ function closeCurrentTab() {
 // anti-cheat watches for them as macro/automation activity — the same class of
 // problem that got student Roblox accounts flagged. The COM route asks the
 // shell to do exactly what Win+D does, with no synthetic input at all.
-let desktopShown = false; // our view of the toggle (COM has no "is shown" query)
-function minimizeAll() {
+// `direction`: "minimize" | "restore" | "toggle" (default).
+// The instructor's Minimize button toggles; a SCHEDULED minimize must not —
+// a blind toggle would minimize on Monday and then *restore* on Tuesday. The
+// boolean is only our guess at the current state (COM has no "is it shown?"
+// query) and drifts if the student restores windows by hand, so anything that
+// wants a definite outcome says so explicitly.
+let desktopShown = false;
+function minimizeAll(direction) {
   if (!IS_WIN) return;
-  const method = desktopShown ? "UndoMinimizeALL" : "MinimizeAll";
-  desktopShown = !desktopShown;
+  const dir = String(direction || "toggle").toLowerCase();
+  const restore = dir === "restore" ? true : dir === "minimize" ? false : desktopShown;
+  const method = restore ? "UndoMinimizeALL" : "MinimizeAll";
+  desktopShown = !restore;
   run("powershell", [
     "-NoProfile",
     "-NonInteractive",

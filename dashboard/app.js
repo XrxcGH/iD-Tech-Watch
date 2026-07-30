@@ -210,7 +210,23 @@
     // tool used in class. The agent matches "roblox" and excludes "studio", so
     // RobloxPlayerBeta dies while RobloxStudioBeta keeps running.
     { id: "roblox", label: "Roblox (Player)", apps: ["roblox"], exclude: ["studio"], sites: ["roblox.com"] },
-    { id: "minecraft", label: "Minecraft", apps: ["minecraft"], sites: ["minecraft.net", "classic.minecraft.net"] },
+    // Minecraft is a special case twice over.
+    // (1) The Java edition's *running game* is not "minecraft.exe" — it is
+    //     javaw.exe, so a name-only block catches the launcher and the website
+    //     but never the game a student is already in. Blocking every javaw would
+    //     take out BlueJ / Processing / IntelliJ and any Java coursework, so the
+    //     block additionally requires "minecraft" in the process command line.
+    // (2) Minecraft is taught in some classes, so it is deliberately NOT part of
+    //     "Block all games" (notInAll) — block it explicitly when a class isn't
+    //     supposed to be playing.
+    {
+      id: "minecraft",
+      label: "Minecraft (launcher + running game)",
+      apps: ["minecraft"],
+      cmdApps: { patterns: ["javaw", "java"], cmd: "minecraft" },
+      sites: ["minecraft.net", "classic.minecraft.net"],
+      notInAll: true,
+    },
     { id: "fortnite", label: "Fortnite", apps: ["fortnite"], sites: [] },
     { id: "steam", label: "Steam", apps: ["steam"], sites: ["steampowered.com", "steamcommunity.com"] },
     { id: "epic", label: "Epic Games", apps: ["epicgames", "fortnite"], sites: ["epicgames.com"] },
@@ -511,14 +527,20 @@
   function blockPreset(dispatch, preset) {
     const dur = ui.blockDurationSec;
     if (preset.apps && preset.apps.length) dispatch("block_app", { patterns: preset.apps, exclude: preset.exclude || [], duration_sec: dur, mode: ui.blockMode });
+    // a second block for host processes identified by their command line
+    if (preset.cmdApps) dispatch("block_app", { patterns: preset.cmdApps.patterns, cmd_match: preset.cmdApps.cmd, duration_sec: dur, mode: ui.blockMode });
     if (preset.sites && preset.sites.length) dispatch("block_site", { domains: preset.sites, duration_sec: dur });
     if (preset.closeTabs) dispatch("close_tab", {}); // close the open tab so the block bites now
     toast(`Blocking ${preset.label}${preset.closeTabs ? " (+ closing the open tab)" : ""}.`);
   }
+  // Presets swept up by "Block all games". Anything marked notInAll (Minecraft —
+  // it is used as a teaching tool in some classes) is left out and must be
+  // blocked deliberately.
+  const presetsInAll = () => BLOCK_PRESETS.filter((p) => !p.notInAll);
   function blockAllGames(dispatch) {
-    const apps = [...new Set(BLOCK_PRESETS.flatMap((p) => p.apps))];
-    const sites = [...new Set(BLOCK_PRESETS.flatMap((p) => p.sites))];
-    const exclude = [...new Set(BLOCK_PRESETS.flatMap((p) => p.exclude || []))];
+    const apps = [...new Set(presetsInAll().flatMap((p) => p.apps))];
+    const sites = [...new Set(presetsInAll().flatMap((p) => p.sites))];
+    const exclude = [...new Set(presetsInAll().flatMap((p) => p.exclude || []))];
     dispatch("block_app", { patterns: apps, exclude, duration_sec: ui.blockDurationSec, mode: ui.blockMode });
     dispatch("block_site", { domains: sites, duration_sec: ui.blockDurationSec });
     dispatch("close_tab", {});
@@ -1838,17 +1860,29 @@
 
   // ---- scheduled events (daily timed closures/pauses) ----
   const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const allApps = () => [...new Set(BLOCK_PRESETS.flatMap((p) => p.apps))];
-  const allSites = () => [...new Set(BLOCK_PRESETS.flatMap((p) => p.sites))];
-  const allExcludes = () => [...new Set(BLOCK_PRESETS.flatMap((p) => p.exclude || []))];
+  // "Block all games" scheduled events use the same set as the button — Minecraft
+  // (notInAll) is excluded so a scheduled sweep never takes out a class using it.
+  const allApps = () => [...new Set(presetsInAll().flatMap((p) => p.apps))];
+  const allSites = () => [...new Set(presetsInAll().flatMap((p) => p.sites))];
+  const allExcludes = () => [...new Set(presetsInAll().flatMap((p) => p.exclude || []))];
   // build(opts) — opts.text (message text) and opts.pauseMin (auto-resume minutes
   // for a timed pause; 0 = stays until a Resume event or manual resume).
   const EVENT_TYPES = [
     { id: "pause", label: "Pause computers (full-screen)", usesPause: true, build: (o) => [{ action: "pause", params: { text: "Paused by your instructor — eyes up front.", duration_sec: o.pauseMin > 0 ? o.pauseMin * 60 : 0 } }] },
     { id: "resume", label: "Resume (end pause)", build: () => [{ action: "resume" }] },
     { id: "block_roblox", label: "Block Roblox (Player)", build: () => [{ action: "block_app", params: { patterns: ["roblox"], exclude: ["studio"] } }, { action: "block_site", params: { domains: ["roblox.com"] } }] },
-    { id: "block_all", label: "Block all games + sites", build: () => [{ action: "block_app", params: { patterns: allApps(), exclude: allExcludes() } }, { action: "block_site", params: { domains: allSites() } }] },
-    { id: "minimize_all", label: "Minimize all windows", build: () => [{ action: "minimize_all" }] },
+    // Minecraft gets its own event because it is excluded from "all games" —
+    // the second block_app catches the running Java game (javaw + "minecraft"
+    // on the command line) without touching other Java programs.
+    { id: "block_minecraft", label: "Block Minecraft (launcher + running game)", build: () => [
+      { action: "block_app", params: { patterns: ["minecraft"] } },
+      { action: "block_app", params: { patterns: ["javaw", "java"], cmd_match: "minecraft" } },
+      { action: "block_site", params: { domains: ["minecraft.net", "classic.minecraft.net"] } },
+    ] },
+    { id: "block_all", label: "Block all games + sites (not Minecraft)", build: () => [{ action: "block_app", params: { patterns: allApps(), exclude: allExcludes() } }, { action: "block_site", params: { domains: allSites() } }] },
+    // explicit direction: a scheduled event must minimize every time it fires,
+    // never toggle back into a restore on the second day
+    { id: "minimize_all", label: "Minimize all windows", build: () => [{ action: "minimize_all", params: { direction: "minimize" } }] },
     { id: "close_tab", label: "Close current tab", build: () => [{ action: "close_tab" }] },
     { id: "close_browsers", label: "Close all browsers", build: () => [{ action: "close_browsers" }] },
     { id: "unblock", label: "Unblock everything", build: () => [{ action: "unblock_all" }] },
