@@ -49,7 +49,7 @@ const IS_MAC = process.platform === "darwin";
 
 // Build stamp — logged on startup so you can confirm which agent version a
 // laptop is actually running (see watch-client.log in the install folder).
-const BUILD = "2026-07-30 minimize-blocks · alt-f4-lock · cmdline-blocks";
+const BUILD = "2026-07-30 cmdline-blocks · restart-proof-autostart";
 
 const ENFORCE_INTERVAL_MS = 2000; // how often to sweep the blocklists
 const STATUS_INTERVAL_DEFAULT = 4; // seconds between status reports

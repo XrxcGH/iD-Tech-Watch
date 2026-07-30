@@ -173,6 +173,66 @@ function addToStartup() {
   } catch (e) {
     log(`could not add to Startup: ${e.message}`);
   }
+  addRunKey();
+  enableStartupEntry();
+  addLogonTask();
+}
+
+// Quietly run a Windows command; never throws, never blocks the launcher.
+function winCmd(exe, args) {
+  try {
+    return require("child_process").execFileSync(exe, args, {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 15000,
+    }).toString();
+  } catch (e) {
+    return (e && e.stdout ? e.stdout.toString() : "") + (e && e.stderr ? e.stderr.toString() : "");
+  }
+}
+
+// A second unelevated auto-start, so deleting the Startup shortcut alone isn't
+// enough to stop the agent coming back.
+function addRunKey() {
+  if (!IS_WIN) return;
+  const startupDir = userStartupDir();
+  const vbs = startupDir ? path.join(startupDir, "iD Tech Watch.vbs") : "";
+  // point at the same hidden .vbs so there's no console flash at logon
+  const cmd = vbs && fs.existsSync(vbs) ? `wscript.exe "${vbs}"` : `"${path.join(DIR, "Start iD Tech Watch.cmd")}"`;
+  winCmd("reg", ["add", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", "/v", APP_NAME, "/t", "REG_SZ", "/d", cmd, "/f"]);
+}
+
+// Task Manager's "Startup apps" tab can DISABLE either of the above — one click,
+// no admin rights, and the agent never comes back after a reboot. The choice is
+// stored under StartupApproved; deleting our values returns them to enabled. We
+// run as the student at logon, so HKCU is the right hive.
+function enableStartupEntry() {
+  if (!IS_WIN) return;
+  const base = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\";
+  const cleared = [
+    winCmd("reg", ["delete", base + "StartupFolder", "/v", "iD Tech Watch.vbs", "/f"]),
+    winCmd("reg", ["delete", base + "Run", "/v", APP_NAME, "/f"]),
+  ].some((o) => /success/i.test(o));
+  if (cleared) log("re-enabled a disabled auto-start entry (Task Manager > Startup apps)");
+}
+
+// Second, sturdier auto-start: a logon-triggered Scheduled Task. The Startup
+// folder is a file in the student's own profile — they can simply delete it —
+// and it is listed in Task Manager's Startup tab. A scheduled task is neither,
+// so the two together survive the obvious "reboot to get rid of it" attempts.
+// Best effort: if the account can't create tasks, the Startup folder still works.
+function addLogonTask() {
+  if (!IS_WIN) return;
+  const startCmd = path.join(DIR, "Start iD Tech Watch.cmd");
+  const out = winCmd("schtasks", [
+    "/Create",
+    "/TN", APP_NAME,
+    "/TR", `"${startCmd}"`,
+    "/SC", "ONLOGON",
+    "/F", // replace an existing definition so upgrades re-point it
+  ]);
+  if (/SUCCESS/i.test(out)) log("registered logon scheduled task for auto-start");
+  else log(`could not register logon task (Startup folder still active): ${out.trim().split(/\r?\n/)[0] || "unknown"}`);
 }
 
 // ---- config --------------------------------------------------------------

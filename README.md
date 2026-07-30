@@ -463,6 +463,39 @@ Watch.cmd**. It (transparently) sets up a self-healing pair of processes:
 
 It is not hidden from Task Manager — deliberately transparent for a supervised lab.
 
+### Restarting the laptop is not an escape
+
+Shutting down used to clear everything: the agent came back with an empty head,
+so an active pause and any blocks were simply gone. Two things close that.
+
+**The agent comes back.** Auto-start is registered three ways, so removing one
+isn't enough: the **Startup folder** `.vbs`, an **HKCU\…\Run** entry, and a
+**logon Scheduled Task**. Every successful run also clears the *StartupApproved*
+flag, so an entry switched off in **Task Manager → Startup apps** is re-enabled
+for the next boot. The scheduled task needs an elevated install to register
+(installs are normally elevated anyway, since website blocking requires it); when
+it can't, the launcher logs that and the other two still work.
+
+**The hub restores what was in force.** The hub — not the laptop — is the
+authority on current state. On every registration it resets the laptop to a known
+state and replays, in order:
+
+1. `unblock_all`, so a block lifted while the laptop was offline doesn't come back
+2. **house (building) rules**, then **class rules** — building wins, as always
+3. **blocks aimed at that computer, class or building**, carrying only the time
+   still left on a timed block
+4. the **pause** — or an explicit resume when there isn't one, so a laptop can
+   never come back showing a lock the hub has already released
+
+So a student who reboots mid-pause logs back in and is paused again, with their
+blocks intact. Ad-hoc blocks are tracked in hub memory (persistent always-block
+rules live in `config.json` and additionally survive a hub restart); a pause older
+than 12 hours is dropped rather than resurrected the next morning.
+
+> A determined student with **local administrator rights** can still remove any of
+> this. Real lockdown is an MDM/kiosk policy — this raises the bar for a standard
+> camp account, it is not a security boundary.
+
 ### Remote command execution (opt-in)
 
 The **Run command…** admin tool lets you run a shell command on a class laptop for
