@@ -337,7 +337,7 @@
       } else if (msg.type === "exec_result") {
         showExecResult(msg);
       } else if (msg.type === "update_result") {
-        toast(msg.ok ? `${msg.name}: updated (${(msg.wrote || []).join(", ") || "no files"}) — restarting.` : `${msg.name}: update failed — ${msg.error}`);
+        toast(msg.ok ? `${msg.name}: updated (${(msg.wrote || []).join(", ") || "no files"}). Restarting.` : `${msg.name}: update failed. ${msg.error}`);
       } else if (msg.type === "error") {
         toast(msg.detail || "Error");
       }
@@ -511,7 +511,7 @@
       el(
         "select",
         {
-          title: "Minimize keeps pushing the game's window down and is safe for game accounts. Force close terminates it, which some games' anti-cheat treats as tampering.",
+          title: "Minimize keeps pushing the game's window down and is safe for game accounts. Force close terminates it, which some anti-cheat systems treat as tampering.",
           onchange: (e) => {
             ui.blockMode = e.target.value;
             toast(ui.blockMode === "kill" ? "Blocks will FORCE CLOSE apps (may flag game accounts)." : "Blocks will minimize apps (safe for game accounts).");
@@ -538,9 +538,9 @@
       body: el(
         "div",
         { class: "composer" },
-        el("p", { class: "muted small" }, "Only windows whose title contains one of these stay open. Everything else is minimized again about once a second — on whichever virtual desktop it appears, so switching desktops doesn't get around it."),
+        el("p", { class: "muted small" }, "Only windows whose title contains one of these stay open. Everything else is minimized again about once a second, on whichever virtual desktop it appears, so switching desktops does not get around it."),
         el("label", { class: "field-inline" }, el("span", {}, "Allowed window titles (comma separated)"), input),
-        el("p", { class: "muted small" }, "Clear the box to allow nothing at all (a full lock). A browser counts as allowed only while its title matches — “New Tab” passes, the same browser on a game site does not.")
+        el("p", { class: "muted small" }, "Clear the box to allow nothing at all, for a full lock. A browser counts as allowed only while its title matches: 'New Tab' passes, the same browser on a game site does not.")
       ),
       actions: [offBtn, onBtn],
     });
@@ -552,7 +552,7 @@
     onBtn.onclick = () => {
       const allow = input.value.split(",").map((s) => s.trim()).filter(Boolean);
       runAll("focus_lock", { on: true, allow });
-      toast(allow.length ? `Focus lock on — allowed: ${allow.join(", ")}` : "Focus lock on — nothing allowed.");
+      toast(allow.length ? `Focus lock on. Allowed: ${allow.join(", ")}` : "Focus lock on. Nothing allowed.");
       m.close();
     };
   }
@@ -661,7 +661,7 @@
       modalPrompt({ title: "Run a command", label: "Command to run (cmd.exe) on the target computer(s)", placeholder: "e.g. ipconfig /all", hint: "Admin only. The client must be started with IDT_ALLOW_EXEC=1. Output is returned to you.", okText: "Run", danger: true }).then((cmd) => {
         if (cmd && cmd.trim()) {
           dispatch("run_command", { command: cmd.trim() });
-          toast("Command sent — waiting for output…");
+          toast("Command sent. Waiting for output…");
         }
       });
 
@@ -870,7 +870,7 @@
     // fixed download button (bottom-right), styled like the Monitor button
     const download = el(
       "a",
-      { class: "download-fab", href: "/download/id-tech-watch.zip", title: "Download the iD Tech Watch client (zip — unzip and run Start iD Tech Watch.cmd)" },
+      { class: "download-fab", href: "/download/id-tech-watch.zip", title: "Download the iD Tech Watch client. Unzip it and run Start iD Tech Watch.cmd." },
       "⬇ iD-Tech-Watch.zip"
     );
     wrap.append(n6, el("main", { class: "content" + (paintAnimate ? " enter" : "") }, content), download);
@@ -931,7 +931,7 @@
     } else {
       // Instructors need no password — each building has its own 4-digit code.
       fields.append(
-        el("p", { class: "login-hint" }, "No password needed — click Continue, then enter your building's 4-digit code.")
+        el("p", { class: "login-hint" }, "No password needed. Click Continue, then enter your building's 4-digit code.")
       );
     }
 
@@ -1155,7 +1155,7 @@
       const openApps = [...new Set(bDevs.flatMap((d) => d.processes || []))].sort((a, x) => a.toLowerCase().localeCompare(x.toLowerCase()));
       const bSeg = (mode, label) => el("button", { class: "seg-btn" + (ui.buildingMode === mode ? " active" : ""), onclick: () => { ui.buildingMode = mode; render(); } }, label);
       const lockBtn = ui.buildingMode === "lab"
-        ? el("button", { class: "btn sm lock-btn" + (ui.seatLocked ? " locked" : ""), title: ui.seatLocked ? "Locked — click to unlock and rearrange rooms" : "Unlocked — drag to arrange. Click to lock.", onclick: () => { ui.seatLocked = !ui.seatLocked; render(); } }, ui.seatLocked ? "🔒 Locked" : "🔓 Unlocked")
+        ? el("button", { class: "btn sm lock-btn" + (ui.seatLocked ? " locked" : ""), title: ui.seatLocked ? "Locked. Click to unlock and rearrange rooms." : "Unlocked. Drag to arrange, or click to lock.", onclick: () => { ui.seatLocked = !ui.seatLocked; render(); } }, ui.seatLocked ? "🔒 Locked" : "🔓 Unlocked")
         : null;
       buildingControls = el(
         "div",
@@ -1202,7 +1202,7 @@
       el("button", { class: "btn danger", onclick: () => blockPreset(runAll, robloxPreset()) }, "Block Roblox"),
       blockSelect(runAll),
       el("button", { class: "btn", onclick: () => runAll("unblock_all", {}) }, "Unblock all"),
-      el("button", { class: "btn", onclick: () => runAll("pause", { text: "Paused by your instructor — eyes up front." }) }, "⏸ Pause"),
+      el("button", { class: "btn", onclick: () => runAll("pause", { text: "Paused by your instructor. Eyes up front." }) }, "⏸ Pause"),
       el("button", { class: "btn", onclick: () => runAll("resume", {}) }, "▶ Resume"),
       el("button", { class: "btn", onclick: () => runAll("close_tab", {}) }, "Close tab"),
       el("button", { class: "btn", onclick: () => runAll("minimize_all", {}) }, "Minimize"),
@@ -1503,7 +1503,7 @@
       "button",
       {
         class: "btn sm lock-btn" + (ui.seatLocked ? " locked" : ""),
-        title: ui.seatLocked ? "Locked — click to unlock and rearrange" : "Unlocked — drag to arrange. Click to lock.",
+        title: ui.seatLocked ? "Locked. Click to unlock and rearrange." : "Unlocked. Drag to arrange, or click to lock.",
         onclick: () => { ui.seatLocked = !ui.seatLocked; render(); },
       },
       ui.seatLocked ? "🔒 Locked" : "🔓 Unlocked"
@@ -1600,7 +1600,7 @@
       { class: "live-view" },
       el("div", { class: "live-badge" }, el("span", { class: "live-dot" }), "LIVE"),
       img,
-      el("div", { class: "live-hint" }, "Live screen — only while this panel is open (~1 fps)")
+      el("div", { class: "live-hint" }, "Live screen, only while this panel is open (about 1 fps)")
     );
     liveView = { deviceId: d.device_id, img, wrap };
     if (d.online) command({ scope: "device", deviceId: d.device_id }, "start_screenshot", {});
@@ -1660,7 +1660,7 @@
         blockSelect(dispatch),
         el("button", { class: "btn sm", onclick: () => promptKill(t) }, "Close app…"),
         el("button", { class: "btn sm", onclick: () => command(t, "unblock_all", {}) }, "Unblock all"),
-        el("button", { class: "btn sm", onclick: () => command(t, "pause", { text: "Paused by your instructor — eyes up front." }) }, "⏸ Pause"),
+        el("button", { class: "btn sm", onclick: () => command(t, "pause", { text: "Paused by your instructor. Eyes up front." }) }, "⏸ Pause"),
         el("button", { class: "btn sm", onclick: () => command(t, "resume", {}) }, "▶ Resume"),
         el("button", { class: "btn sm", onclick: () => command(t, "close_tab", {}) }, "Close tab"),
         el("button", { class: "btn sm", onclick: () => command(t, "minimize_all", {}) }, "Minimize"),
@@ -1742,7 +1742,7 @@
         blockSelect(dispatch),
         el("button", { class: "btn sm", onclick: () => promptKill(t) }, "Close app…"),
         el("button", { class: "btn sm", onclick: () => command(t, "unblock_all", {}) }, "Unblock all"),
-        el("button", { class: "btn sm", onclick: () => command(t, "pause", { text: "Paused by your instructor — eyes up front." }) }, "⏸ Pause"),
+        el("button", { class: "btn sm", onclick: () => command(t, "pause", { text: "Paused by your instructor. Eyes up front." }) }, "⏸ Pause"),
         el("button", { class: "btn sm", onclick: () => command(t, "resume", {}) }, "▶ Resume"),
         el("button", { class: "btn sm", onclick: () => command(t, "close_tab", {}) }, "Close tab"),
         el("button", { class: "btn sm", onclick: () => command(t, "minimize_all", {}) }, "Minimize"),
@@ -1844,7 +1844,7 @@
       if (style === "lock") {
         const mins = parseInt(autoResumeSel.value, 10) || 0;
         runner("pause", { text: t, duration_sec: mins > 0 ? mins * 60 : 0 });
-        toast(mins > 0 ? `Screen locked (auto-resumes in ${mins} min).` : "Screen locked — press Resume to lift.");
+        toast(mins > 0 ? `Screen locked (auto-resumes in ${mins} min).` : "Screen locked. Press Resume to lift.");
       } else {
         runner("message", { text: t, hold_sec: parseInt(holdSel.value, 10) || 0, auto_close_sec: parseInt(autoCloseSel.value, 10) || 0 });
         toast("Message sent.");
@@ -1903,7 +1903,7 @@
   // build(opts) — opts.text (message text) and opts.pauseMin (auto-resume minutes
   // for a timed pause; 0 = stays until a Resume event or manual resume).
   const EVENT_TYPES = [
-    { id: "pause", label: "Pause computers (full-screen)", usesPause: true, build: (o) => [{ action: "pause", params: { text: "Paused by your instructor — eyes up front.", duration_sec: o.pauseMin > 0 ? o.pauseMin * 60 : 0 } }] },
+    { id: "pause", label: "Pause computers (full-screen)", usesPause: true, build: (o) => [{ action: "pause", params: { text: "Paused by your instructor. Eyes up front.", duration_sec: o.pauseMin > 0 ? o.pauseMin * 60 : 0 } }] },
     { id: "resume", label: "Resume (end pause)", build: () => [{ action: "resume" }] },
     { id: "block_roblox", label: "Block Roblox (Player)", build: () => [{ action: "block_app", params: { patterns: ["roblox"], exclude: ["studio"] } }, { action: "block_site", params: { domains: ["roblox.com"] } }] },
     // Minecraft gets its own event because it is excluded from "all games" —
@@ -1951,7 +1951,7 @@
     const scopeSel = el(
       "select",
       { class: "target-scope" },
-      ...[["all", "Everyone — all campuses"], ["location", "Whole campus…"], ["building", "Specific buildings…"], ["class", "Specific classes…"]].map(([v, t]) => el("option", { value: v, selected: v === initScope }, t))
+      ...[["all", "Everyone (all campuses)"], ["location", "Whole campus…"], ["building", "Specific buildings…"], ["class", "Specific classes…"]].map(([v, t]) => el("option", { value: v, selected: v === initScope }, t))
     );
     // filters (narrow the checkbox list): campus for buildings; campus + building
     // for classes — so big orgs aren't a wall of every class.
@@ -2139,7 +2139,7 @@
       el(
         "div",
         { class: "sched-form" + (editing ? " editing" : "") },
-        editing ? el("div", { class: "sched-editing-note" }, `Editing “${editing.name}” — change any field and Save.`) : null,
+        editing ? el("div", { class: "sched-editing-note" }, `Editing “${editing.name}”. Change any field, then Save.`) : null,
         el("div", { class: "sched-row" }, fieldInline("Name", nameI), fieldInline("Time", timeI)),
         el("div", { class: "sched-row" }, fieldInline("Days (none = every day)", dayBtns)),
         el("div", { class: "sched-row" }, fieldInline("Event", typeSel), pauseField, msgField, msgSecField),
@@ -2297,7 +2297,7 @@
       "div",
       {},
       el("p", { class: "modal-msg" }, `“${nameOf(d)}” is running an older agent (${d.build || "unknown version"}) from before remote updates existed, so it can’t be updated from here yet.`),
-      el("p", { class: "modal-msg" }, "Do this once on that laptop — after that, every future update is one click from here:"),
+      el("p", { class: "modal-msg" }, "Do this once on that laptop. After that, every future update is one click from here:"),
       el("ol", { class: "help-steps" },
         el("li", {}, "Download the client with the ⬇ iD-Tech-Watch.zip button (bottom-right)."),
         el("li", {}, "Unzip it on the laptop and run “Start iD Tech Watch.cmd”."),
@@ -2403,7 +2403,7 @@
           // explain the one-time manual bootstrap instead.
           updateBtn = el(
             "button",
-            { class: "btn ghost sm warn-outline", title: "This laptop runs an older agent that can't be updated remotely yet — one manual install needed.", onclick: () => showManualUpdateHelp(d) },
+            { class: "btn ghost sm warn-outline", title: "This laptop runs an older agent that can't be updated remotely yet. It needs one manual install.", onclick: () => showManualUpdateHelp(d) },
             "How to update"
           );
         } else {
@@ -2412,7 +2412,7 @@
             {
               class: "btn ghost sm" + (stale ? " primary" : ""),
               disabled: !d.online,
-              title: !d.online ? "Computer is offline" : "Push the latest software. The app restarts itself — the computer does NOT need restarting, and its name/server settings are kept.",
+              title: !d.online ? "Computer is offline" : "Push the latest software. The app restarts itself; the computer does not need restarting, and its name and server settings are kept.",
               onclick: () =>
                 d.online &&
                 modalConfirm(`Update “${nameOf(d)}” to the latest software now?\n\nThe iD Tech Watch app closes and reopens itself within a few seconds. The computer is NOT restarted and the student doesn't have to do anything. Its settings (name, server, building) are kept.`, { title: "Update computer", okText: "Update now" }).then((ok) => {
@@ -2465,7 +2465,7 @@
       "button",
       {
         class: "btn sm" + (staleRemote ? " primary" : ""),
-        title: "Push the latest software to every online computer that supports remote update. Each app restarts itself — no computer restarts, settings kept.",
+        title: "Push the latest software to every online computer that supports remote update. Each app restarts itself, no computer restarts, and settings are kept.",
         onclick: () =>
           modalConfirm("Push the latest software to ALL online computers now?\n\nEach laptop's iD Tech Watch app closes and reopens itself within a few seconds — the computers are NOT restarted and students don't have to do anything. Each keeps its own settings (name, server, building). Older laptops that need a one-time manual install are skipped automatically.", { title: "Update all computers", okText: "Update all" }).then((ok) => {
             if (ok) {
@@ -2482,7 +2482,7 @@
       buildingsFlat.length > 1 ? el("div", { class: "filter-field" }, el("span", { class: "filter-label" }, "Houses:"), buildingChks) : null,
       statusSel,
       el("span", { class: "muted small" }, `${onlineCount(devs)}/${devs.length} shown`),
-      manualNeeded ? el("span", { class: "muted small manual-note", title: "These run an older agent from before remote updates — install once manually, then they update from here." }, `⚠ ${manualNeeded} need a one-time manual install`) : null,
+      manualNeeded ? el("span", { class: "muted small manual-note", title: "These run an older agent from before remote updates. Install once manually and they will update from here after that." }, `⚠ ${manualNeeded} need a one-time manual install`) : null,
       auth && auth.role === "admin" ? updateAllBtn : null
     );
 
@@ -2497,7 +2497,7 @@
             "div",
             { class: "zip-warn" },
             zip.missing
-              ? el("div", {}, "⚠ No install package has been built on this hub yet — the Download button will not work.")
+              ? el("div", {}, "⚠ No install package has been built on this hub yet, so the Download button will not work.")
               : el(
                   "div",
                   {},
@@ -2641,7 +2641,7 @@
     const sheet = el("div", { class: "sheet code-sheet" });
     sheet.addEventListener("click", (e) => e.stopPropagation());
     sheet.append(
-      el("div", { class: "sheet-head" }, el("span", { class: "sheet-title" }, `Enter code — ${b.name}`), el("span", { class: "spacer" }), el("button", { class: "btn ghost sm", onclick: cancel }, "✕")),
+      el("div", { class: "sheet-head" }, el("span", { class: "sheet-title" }, `Enter code for ${b.name}`), el("span", { class: "spacer" }), el("button", { class: "btn ghost sm", onclick: cancel }, "✕")),
       el("div", { class: "sheet-sub" }, "Ask your director for this building's 4-digit instructor code."),
       input,
       err

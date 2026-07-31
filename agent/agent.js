@@ -1123,7 +1123,7 @@ function stopScreenshot() {
 // an OS lock (an admin could Task-Manager out of it) — deliberately transparent,
 // meant for a supervised classroom.
 function pauseScreen(text, durationSec) {
-  pauseMessage = text || "Paused by your instructor — eyes up front.";
+  pauseMessage = text || "Paused by your instructor. Eyes up front.";
   pauseActive = true;
   // Optional auto-resume (used by timed/scheduled pauses): resume on our own
   // after durationSec so the instructor doesn't have to send a manual Resume.
@@ -1402,7 +1402,7 @@ function main() {
     `location=${JSON.stringify(args.location)} building=${JSON.stringify(args.building)}` +
       (args.klass ? ` class-hint=${JSON.stringify(args.klass)}` : "")
   );
-  log("MONITORING ACTIVE — this laptop is managed by an iD Tech instructor.");
+  log("MONITORING ACTIVE: this laptop is managed by an iD Tech instructor.");
   if (args.keepAwake) keepAwake();
 
   // Enforce blocks on a steady cadence, independent of connectivity.
