@@ -523,6 +523,40 @@
     );
   }
 
+  // Focus lock: keep students in the curriculum apps. Anything whose WINDOW
+  // TITLE doesn't contain one of these is minimized about once a second. Titles
+  // rather than app names, so a browser is allowed only while it is on an
+  // allowed page — "New Tab" passes, the same browser on YouTube does not.
+  const FOCUS_DEFAULT = ["gameplan", "new tab", "vex", "v5"];
+  function openFocusLock(runAll) {
+    const input = el("input", { class: "combo-input", value: FOCUS_DEFAULT.join(", "), style: "width:100%" });
+    const offBtn = el("button", { class: "btn" }, "Turn OFF");
+    const onBtn = el("button", { class: "btn primary" }, "Turn ON");
+    const m = openModal({
+      title: "🎯 Focus lock",
+      width: "560px",
+      body: el(
+        "div",
+        { class: "composer" },
+        el("p", { class: "muted small" }, "Only windows whose title contains one of these stay open. Everything else is minimized again about once a second — on whichever virtual desktop it appears, so switching desktops doesn't get around it."),
+        el("label", { class: "field-inline" }, el("span", {}, "Allowed window titles (comma separated)"), input),
+        el("p", { class: "muted small" }, "Clear the box to allow nothing at all (a full lock). A browser counts as allowed only while its title matches — “New Tab” passes, the same browser on a game site does not.")
+      ),
+      actions: [offBtn, onBtn],
+    });
+    offBtn.onclick = () => {
+      runAll("focus_lock", { on: false });
+      toast("Focus lock off.");
+      m.close();
+    };
+    onBtn.onclick = () => {
+      const allow = input.value.split(",").map((s) => s.trim()).filter(Boolean);
+      runAll("focus_lock", { on: true, allow });
+      toast(allow.length ? `Focus lock on — allowed: ${allow.join(", ")}` : "Focus lock on — nothing allowed.");
+      m.close();
+    };
+  }
+
   const robloxPreset = () => BLOCK_PRESETS.find((p) => p.id === "roblox");
   function blockPreset(dispatch, preset) {
     const dur = ui.blockDurationSec;
@@ -1172,6 +1206,7 @@
       el("button", { class: "btn", onclick: () => runAll("resume", {}) }, "▶ Resume"),
       el("button", { class: "btn", onclick: () => runAll("close_tab", {}) }, "Close tab"),
       el("button", { class: "btn", onclick: () => runAll("minimize_all", {}) }, "Minimize"),
+      el("button", { class: "btn", onclick: () => openFocusLock(runAll) }, "🎯 Focus…"),
       el("button", { class: "btn", onclick: () => openSendKeys(runAll) }, "⌨ Keys…"),
       el("button", { class: "btn", onclick: () => openMessageComposer(runAll, where) }, "✉ Message / Lock…")
     );

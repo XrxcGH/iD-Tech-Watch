@@ -139,10 +139,22 @@ blocked from user mode.
 
 A **locked** full-screen message holds the machine the same way a pause does: for
 as long as its hold is running it installs the same key lock, so it can't be
-Alt+F4'd away *or* escaped with **Win+Ctrl+←/→ onto another virtual desktop**
-(which used to leave the student with a free computer while the instructor's
-screen still showed the message). The lock lifts the instant the message becomes
-dismissible.
+Alt+F4'd away *or* escaped with **Win+Ctrl+←/→ onto another virtual desktop**.
+
+Keys alone aren't enough, though — a **three-finger touchpad swipe changes
+desktop with no keystroke at all**, so no keyboard hook can see it. While a pause
+or a held message is up, the agent therefore also runs a **focus guard**: about
+once a second it minimizes every window that isn't allowed, wherever it appears.
+Switching desktops still works, it just gets you an empty one — anything you open
+is pushed straight back down. The guard skips windows with no title, which is
+what the lock itself reports, so it can never minimize the lock it is protecting.
+
+**🎯 Focus…** exposes the same mechanism on its own, to keep a class in the
+curriculum apps. You give it a list of **window-title** substrings — the default
+is `gameplan, new tab, vex, v5` — and anything whose title doesn't match is
+minimized on sight. Matching on the title rather than the app means a browser
+counts as allowed only while it is on an allowed page: *New Tab* passes, the same
+browser on a game site does not. Clear the list to allow nothing at all.
 
 **Message / Lock (one composer)** — the **✉ Message / Lock…** button opens a real
 in-app dialog (no browser pop-ups) that does both jobs: a **Pop-up message** (a
@@ -383,6 +395,11 @@ optional `exclude[]` (substrings to spare — e.g. block `roblox` while sparing
 `studio`); `block_site` accepts `domain` or `domains[]`; both accept `duration_sec`
 (omit/0 = until lifted). `pause` accepts `text` and an optional `duration_sec`
 (auto-resume — the agent lifts on its own and the hub also sends a resume).
+`focus_lock` takes `on` (bool), `allow[]` (window-title substrings) and an
+optional `duration_sec`; while on, a single persistent helper minimizes every
+visible, titled, non-allowed window about once a second. It is turned on
+automatically for the duration of a pause or a held message (with an empty
+allow-list, so nothing gets through) and released when the lock lifts.
 `block_app` also accepts `mode`: `"minimize"` (default — keep the app's windows
 minimized via `EnumWindows` + `ShowWindow(SW_FORCEMINIMIZE)`, opening no handle on
 the process) or `"kill"` (force-close). An older hub that sends no `mode` gets the
