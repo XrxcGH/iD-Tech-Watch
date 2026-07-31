@@ -49,7 +49,7 @@ const IS_MAC = process.platform === "darwin";
 
 // Build stamp — logged on startup so you can confirm which agent version a
 // laptop is actually running (see watch-client.log in the install folder).
-const BUILD = "2026-07-30 fullscreen-capture · desktop-hop-lock · state-cache";
+const BUILD = "2026-07-30 focus-guard · fullscreen-capture · state-cache";
 
 const ENFORCE_INTERVAL_MS = 2000; // how often to sweep the blocklists
 const STATUS_INTERVAL_DEFAULT = 4; // seconds between status reports
@@ -340,6 +340,101 @@ const MIN_CSHARP = [
   "}",
 ].join("\n");
 
+// Focus guard: keep pushing down every window that isn't allowed.
+//
+// A full-screen lock only covers the virtual desktop it lives on. A student can
+// switch desktops — and crucially, a THREE-FINGER TOUCHPAD SWIPE does that with
+// no keystroke at all, so the keyboard lock can't see it — landing on a clean
+// desktop with the lock stranded behind them. Rather than fight the (undocumented,
+// build-specific) desktop-pinning APIs, this makes the escape pointless: whatever
+// they raise over there is minimized again within a second.
+//
+// Skips windows with an EMPTY title, which is what our own WPF locks report
+// (verified), so the guard can never minimize the lock it is protecting.
+const FOCUS_CSHARP = [
+  "using System;",
+  "using System.Text;",
+  "using System.Runtime.InteropServices;",
+  "public static class IDTFocus {",
+  "  public delegate bool EnumProc(IntPtr h, IntPtr p);",
+  "  [DllImport(\"user32.dll\")] static extern bool EnumWindows(EnumProc cb, IntPtr p);",
+  "  [DllImport(\"user32.dll\")] static extern bool IsWindowVisible(IntPtr h);",
+  "  [DllImport(\"user32.dll\")] static extern bool IsIconic(IntPtr h);",
+  "  [DllImport(\"user32.dll\")] static extern bool ShowWindow(IntPtr h, int n);",
+  "  [DllImport(\"user32.dll\")] static extern int GetWindowTextLength(IntPtr h);",
+  "  [DllImport(\"user32.dll\")] static extern int GetWindowText(IntPtr h, StringBuilder s, int c);",
+  "  const int SW_FORCEMINIMIZE = 11;",
+  "  public static int MinimizeExcept(string[] allow) {",
+  "    int n = 0;",
+  "    EnumProc cb = delegate(IntPtr h, IntPtr l) {",
+  "      if (!IsWindowVisible(h) || IsIconic(h)) return true;",
+  "      int len = GetWindowTextLength(h);",
+  "      if (len <= 0) return true;",                       // our own locks + tool windows
+  "      var sb = new StringBuilder(len + 1);",
+  "      GetWindowText(h, sb, sb.Capacity);",
+  "      string t = sb.ToString();",
+  "      if (t == \"Program Manager\") return true;",       // the desktop itself
+  "      string lt = t.ToLowerInvariant();",
+  "      for (int i = 0; i < allow.Length; i++) {",
+  "        if (allow[i].Length > 0 && lt.Contains(allow[i])) return true;",
+  "      }",
+  "      ShowWindow(h, SW_FORCEMINIMIZE); n++;",
+  "      return true;",
+  "    };",
+  "    EnumWindows(cb, IntPtr.Zero);",
+  "    GC.KeepAlive(cb);",
+  "    return n;",
+  "  }",
+  "}",
+].join("\n");
+
+let focusChild = null; // persistent sweeper (one process, not one per tick)
+const focusReasons = new Map(); // reason -> allowed title substrings
+
+// Effective allow-list: a hard lock (pause / held message) passes an EMPTY list
+// and must win, so nothing is allowed through while one is up.
+function effectiveFocusAllow() {
+  const lists = [...focusReasons.values()];
+  if (!lists.length) return null;
+  if (lists.some((l) => !l.length)) return [];
+  return [...new Set(lists.flat())];
+}
+
+function applyFocusGuard() {
+  const allow = effectiveFocusAllow();
+  if (focusChild) {
+    try {
+      focusChild.kill();
+    } catch (_) {}
+    focusChild = null;
+  }
+  if (allow === null || !IS_WIN) return; // nothing holding the guard
+  const psArray = allow.length ? allow.map((a) => `'${safePat(a).replace(/'/g, "''")}'`).join(",") : "";
+  const ps =
+    "$src = @'\n" + FOCUS_CSHARP + "\n'@\n" +
+    "Add-Type -TypeDefinition $src -ErrorAction SilentlyContinue\n" +
+    `$allow = @(${psArray}); ` +
+    "while($true){ try { [void][IDTFocus]::MinimizeExcept([string[]]$allow) } catch {} Start-Sleep -Milliseconds 900 }";
+  focusChild = spawn("powershell", ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps], {
+    windowsHide: true,
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  focusChild.on("exit", () => {
+    focusChild = null;
+  });
+  log(`focus guard ON (allowed: ${allow.length ? allow.join(", ") : "nothing — full lock"})`);
+}
+
+function startFocusGuard(reason, allow) {
+  focusReasons.set(reason, (allow || []).map((a) => String(a).toLowerCase().trim()).filter(Boolean));
+  applyFocusGuard();
+}
+function stopFocusGuard(reason) {
+  if (!focusReasons.delete(reason)) return;
+  applyFocusGuard();
+  if (!focusReasons.size) log("focus guard OFF");
+}
+
 // Minimize — rather than kill — every window of the processes matching `blocks`.
 // This is the DEFAULT enforcement for app blocks.
 //
@@ -473,7 +568,16 @@ function showMessage(text, holdSec, autoCloseSec) {
         "[void]$w.ShowDialog();";
       // the shared lock class has to exist before the window script runs
       const ps = "$src = @'\n" + LOCK_CSHARP + "\n'@\nAdd-Type -TypeDefinition $src -ErrorAction SilentlyContinue\n" + body;
-      execFile("powershell", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps], { windowsHide: true }, () => {});
+      // While the message is COMPULSORY, hold the whole machine: the keyboard
+      // lock can't see a touchpad swipe to another virtual desktop, so the focus
+      // guard makes that escape useless too. Lifted when the hold expires.
+      if (holdSec > 0) {
+        startFocusGuard("message", []);
+        setTimeout(() => stopFocusGuard("message"), holdSec * 1000 + 500);
+      }
+      execFile("powershell", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps], { windowsHide: true }, () => {
+        if (holdSec > 0) stopFocusGuard("message"); // dismissed early / window died
+      });
     } else if (IS_MAC) {
       const safe = text.replace(/"/g, '\\"');
       const giveUp = autoCloseSec > 0 ? ` giving up after ${autoCloseSec}` : "";
@@ -718,6 +822,18 @@ async function handleCommand(ws, msg) {
     await closeBrowsers();
   } else if (action === "close_tab") {
     closeCurrentTab();
+  } else if (action === "focus_lock") {
+    // Keep the student in the approved apps: anything whose window title doesn't
+    // match the allow-list gets minimized about once a second. Titles, not
+    // process names, so a browser counts as allowed only while it is on an
+    // allowed page ("New Tab") and not once it has navigated somewhere else.
+    if (p.on === false) {
+      stopFocusGuard("manual");
+    } else {
+      const allow = (Array.isArray(p.allow) ? p.allow : String(p.allow || "").split(",")).map((s) => String(s).trim()).filter(Boolean);
+      startFocusGuard("manual", allow);
+      if (p.duration_sec) setTimeout(() => stopFocusGuard("manual"), Number(p.duration_sec) * 1000);
+    }
   } else if (action === "minimize_all") {
     minimizeAll(p.direction);
   } else if (action === "send_keys") {
@@ -1007,7 +1123,7 @@ function stopScreenshot() {
 // an OS lock (an admin could Task-Manager out of it) — deliberately transparent,
 // meant for a supervised classroom.
 function pauseScreen(text, durationSec) {
-  pauseMessage = text || "Paused by your instructor — eyes up front.";
+  pauseMessage = text || "Paused by your instructor. Eyes up front.";
   pauseActive = true;
   // Optional auto-resume (used by timed/scheduled pauses): resume on our own
   // after durationSec so the instructor doesn't have to send a manual Resume.
@@ -1038,6 +1154,10 @@ function pauseScreen(text, durationSec) {
     return;
   }
   spawnPauseWindow();
+  // Nothing is allowed while paused — if the student hops to another virtual
+  // desktop (a touchpad swipe does it with no keystroke to intercept), whatever
+  // they open there is pushed straight back down.
+  startFocusGuard("pause", []);
   log("screen paused");
 }
 
@@ -1108,6 +1228,7 @@ function spawnPauseWindow() {
 
 function resumeScreen() {
   pauseActive = false;
+  stopFocusGuard("pause");
   if (pauseTimer) {
     clearTimeout(pauseTimer);
     pauseTimer = null;
@@ -1132,6 +1253,11 @@ function killHelpers() {
   } catch (_) {}
   try {
     if (screenshotChild) screenshotChild.kill();
+  } catch (_) {}
+  // never leave a sweeper minimizing the student's windows after we exit
+  focusReasons.clear();
+  try {
+    if (focusChild) focusChild.kill();
   } catch (_) {}
 }
 function cleanupAndExit(code) {
@@ -1276,7 +1402,7 @@ function main() {
     `location=${JSON.stringify(args.location)} building=${JSON.stringify(args.building)}` +
       (args.klass ? ` class-hint=${JSON.stringify(args.klass)}` : "")
   );
-  log("MONITORING ACTIVE — this laptop is managed by an iD Tech instructor.");
+  log("MONITORING ACTIVE: this laptop is managed by an iD Tech instructor.");
   if (args.keepAwake) keepAwake();
 
   // Enforce blocks on a steady cadence, independent of connectivity.
